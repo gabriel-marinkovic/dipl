@@ -30,3 +30,13 @@
 *.exe
 *.out
 *.app
+
+# CMake
+build
+install
+
+# Sublime Text
+*.sublime-workspace
+
+# Python
+*/__pycache__
