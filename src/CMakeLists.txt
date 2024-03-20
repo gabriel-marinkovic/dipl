@@ -1,2 +1,6 @@
 add_library(example_client SHARED app.cpp)
 configure_DynamoRIO_client(example_client)
+use_DynamoRIO_extension(example_client drmgr)
+use_DynamoRIO_extension(example_client drreg)
+use_DynamoRIO_extension(example_client drutil)
+use_DynamoRIO_extension(example_client drx)
