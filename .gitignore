@@ -33,3 +33,6 @@
 
 # Build
 build
+
+# Sublime Text
+*.sublime-workspace
