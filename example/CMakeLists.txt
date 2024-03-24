@@ -1,1 +1,1 @@
-add_executable(example_program example_program.cpp)
+add_executable(double_checked_locking double_checked_locking.cpp)
