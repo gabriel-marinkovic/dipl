@@ -1,4 +1,4 @@
-add_library(client SHARED client.cpp)
+add_library(client SHARED client.cpp common.cpp)
 configure_DynamoRIO_client(client)
 use_DynamoRIO_extension(client drmgr)
 use_DynamoRIO_extension(client drreg)

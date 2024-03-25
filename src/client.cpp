@@ -35,11 +35,50 @@
 #include <stddef.h> /* for offsetof */
 #include <stdio.h>
 #include <string.h>
+
 #include "dr_api.h"
 #include "drmgr.h"
 #include "drreg.h"
 #include "drutil.h"
 #include "drx.h"
+
+#include "common.h"
+
+namespace app {
+
+void test(void *drcontext) {
+  const char* path = "/home/gabriel/dipl/foo.bin";
+  file_t file = dr_open_file(path, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
+  DR_ASSERT(file != INVALID_FILE);
+
+  BufferedFileWriter writer;
+  BufferedFileWriter::Make(&writer, drcontext, file, 53);
+
+  for (uint32_t i = 0; i < 100; ++i) {
+    writer.WriteUint16LE(i);
+    writer.WriteUint32LE(i);
+  }
+
+  writer.FlushAndDestroy();
+
+  file = dr_open_file(path, DR_FILE_READ | DR_FILE_ALLOW_LARGE);
+  DR_ASSERT(file != INVALID_FILE);
+
+  BufferedFileReader reader;
+  BufferedFileReader::Make(&reader, drcontext, file, 28);
+
+  uint16_t value;
+  while (reader.ReadUint16LE(&value)) {
+    uint32_t value2;
+    bool ok = reader.ReadUint32LE(&value2);
+    DR_ASSERT(ok);
+    printf("!!! %d %d\n", value, value2);
+  }
+
+  reader.Destroy();
+}
+
+}  // namespace app
 
 #define BUFFER_SIZE_ELEMENTS(a) (sizeof(a) / sizeof((a)[0]))
 #define NULL_TERMINATE_BUFFER(a) ((a)[BUFFER_SIZE_ELEMENTS(a) - 1] = '\0')
@@ -114,6 +153,9 @@ typedef struct _mem_ref_t {
 #define MEM_BUF_SIZE (sizeof(mem_ref_t) * MAX_NUM_MEM_REFS)
 
 /* thread private log file and counter */
+
+struct ThreadUserdata {};
+
 typedef struct {
   byte* seg_base;
   mem_ref_t* buf_base;
@@ -328,6 +370,8 @@ static dr_emit_flags_t event_bb_app2app(void* drcontext, void* tag, instrlist_t*
 }
 
 static void event_thread_init(void* drcontext) {
+  app::test(drcontext);
+
   per_thread_t* data = (per_thread_t*)dr_thread_alloc(drcontext, sizeof(per_thread_t));
   DR_ASSERT(data != NULL);
   drmgr_set_tls_field(drcontext, tls_idx, data);
