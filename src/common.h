@@ -74,8 +74,14 @@ Defer_RAII<F> defer_function(F f) {
 // Utilities
 ///////////////////////////////////////////////////////////////////////////////
 
-template<typename T> T min(T const& a, T const& b) { return a < b ? a : b; }
-template<typename T> T max(T const& a, T const& b) { return a > b ? a : b; }
+template <typename T>
+T min(T const& a, T const& b) {
+  return a < b ? a : b;
+}
+template <typename T>
+T max(T const& a, T const& b) {
+  return a > b ? a : b;
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // Array
@@ -85,12 +91,127 @@ template <typename T>
 struct Array {
   size_t count;
   T* address;
+
+  inline T& operator[](const size_t idx) const {
+    DR_ASSERT(idx < count);
+    return address[idx];
+  }
+
+  class Iterator {
+   public:
+    using iterator_category = std::forward_iterator_tag;
+    using value_type = T;
+    using difference_type = ptrdiff_t;
+    using pointer = T*;
+    using reference = T&;
+
+    Iterator(pointer ptr_) : ptr(ptr_) {}
+
+    reference operator*() const { return *ptr; }
+    pointer operator->() { return ptr; }
+
+    inline Iterator& operator++() {
+      ptr++;
+      return *this;
+    }
+
+    // Postfix increment
+    inline Iterator operator++(int) {
+      Iterator tmp = *this;
+      ++(*this);
+      return tmp;
+    }
+
+    inline friend bool operator==(const Iterator& a, const Iterator& b) { return a.ptr == b.ptr; }
+    inline friend bool operator!=(const Iterator& a, const Iterator& b) { return a.ptr != b.ptr; }
+
+   private:
+    pointer ptr;
+  };
+
+  // Functions to obtain iterators
+  Iterator begin() const { return Iterator(address); }
+  Iterator end() const { return Iterator(address + count); }
 };
 
 template <typename T>
 inline Array<uint8_t> AsBytes(T* value) {
   return {sizeof(T), reinterpret_cast<uint8_t*>(value)};
 }
+
+template <typename T, typename... Arrays>
+Array<T> concatenate(void* drcontext, const Array<T>& first, const Arrays&... rest) {
+  size_t totalCount = (first.count + ... + rest.count);
+  Array<T> result = DrThreadAllocArray<T>(drcontext, totalCount);
+
+  size_t cursor = 0;
+  auto copy = [&result, &cursor](const auto& array) {
+    memcpy(result.address + cursor, array.address, array.count * sizeof(T));
+    cursor += array.count;
+  };
+
+  copy(first);
+  (copy(rest), ...);
+
+  return result;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// String
+///////////////////////////////////////////////////////////////////////////////
+
+using String = Array<uint8_t>;
+
+bool IsWhitespace(uint8_t character);
+
+static String Wrap(const char* cStr);
+
+// Always returns a zero-terminated string.
+static String Allocate(void* drcontext, const char* cStr);
+static String Allocate(void* drcontext, String string);
+static String Allocate(void* drcontext, String string);
+
+String Substring(String string, size_t start_index, size_t length);
+
+bool operator==(String lhs, String rhs);
+bool operator==(String lhs, const char* rhs);
+bool operator==(const char* lhs, String rhs);
+
+inline bool operator!=(String lhs, String rhs) { return !(lhs == rhs); }
+inline bool operator!=(String lhs, const char* rhs) { return !(lhs == rhs); }
+inline bool operator!=(const char* lhs, String rhs) { return !(lhs == rhs); }
+
+bool PrefixEquals(String string, String prefix);
+bool SuffixEquals(String string, String suffix);
+bool CompareCaseInsensitive(const void* m1, const void* m2, size_t length);
+bool CompareCaseInsensitive(String lhs, String rhs);
+bool PrefixEqualsCaseInsensitive(String string, String prefix);
+bool SuffixEqualsCaseInsensitive(String string, String suffix);
+
+constexpr size_t kNotFound = ~(size_t)0;
+
+size_t FindFirstOccurance(String string, uint8_t of);
+size_t FindFirstOccurance(String string, String of);
+size_t FindFirstOccuranceOfAny(String string, String anyOf);
+inline size_t FindFirstOccurance(String string, char of) { return FindFirstOccurance(string, (uint8_t)of); }
+
+String Consume(String string, size_t amount = 1);
+void Consume(String* string, size_t amount);
+String Take(String* string, size_t amount);
+void ConsumeWhitespace(String* string);
+
+static String ConsumeLine(String* string);
+static String ConsumeLinePreserveWhitespace(String* string);
+static String ConsumeUntil(String* string, uint8_t UntilWhat);
+static String ConsumeUntil(String* string, String UntilWhat);
+static String ConsumeUntilPreserveWhitespace(String* string, String UntilWhat);
+static String ConsumeUntilAny(String* string, String UntilAnyOf);
+static String ConsumeUntilWhitespace(String* string);
+static String ConsumeUntilLast(String* string, uint8_t UntilWhat);
+static String ConsumeUntilLast(String* string, String UntilWhat);
+static String Trim(String string);
+static String TrimFront(String string);
+static String TrimBack(String string);
 
 ///////////////////////////////////////////////////////////////////////////////
 // Filesystem
@@ -119,13 +240,15 @@ struct BufferedFileWriter {
   inline void WriteUint16LE(uint16_t value) { Write(AsBytes(&value)); }
   inline void WriteUint32LE(uint32_t value) { Write(AsBytes(&value)); }
   inline void WriteUint64LE(uint64_t value) { Write(AsBytes(&value)); }
+
+  void WriteString(String string);
 };
 
 struct BufferedFileReader {
   void* drcontext;
   file_t file;
   uint64_t fileSize;
-	uint64_t fileCursor;
+  uint64_t fileCursor;
 
   Array<uint8_t> buffer;
   size_t bufferCursor;
@@ -138,49 +261,62 @@ struct BufferedFileReader {
   bool Read(Array<uint8_t> const& data);
 
   // We only support LE architectures.
-  inline bool ReadUint8LE(uint8_t* value) { *value = 0; return Read(AsBytes(value)); }
-  inline bool ReadUint16LE(uint16_t* value) { *value = 0; return Read(AsBytes(value)); }
-  inline bool ReadUint32LE(uint32_t* value) { *value = 0; return Read(AsBytes(value)); }
-  inline bool ReadUint64LE(uint64_t* value) { *value = 0; return Read(AsBytes(value)); }
+  inline bool ReadUint8LE(uint8_t* value) {
+    *value = 0;
+    return Read(AsBytes(value));
+  }
+  inline bool ReadUint16LE(uint16_t* value) {
+    *value = 0;
+    return Read(AsBytes(value));
+  }
+  inline bool ReadUint32LE(uint32_t* value) {
+    *value = 0;
+    return Read(AsBytes(value));
+  }
+  inline bool ReadUint64LE(uint64_t* value) {
+    *value = 0;
+    return Read(AsBytes(value));
+  }
+
+  bool ReadString(String* string);
 };
 
 ///////////////////////////////////////////////////////////////////////////////
 // DynamoRIO utilities
 ///////////////////////////////////////////////////////////////////////////////
 
-template<typename T, bool zero = true>
+template <typename T, bool zero = true>
 inline T* DrThreadAlloc(void* drcontext) {
-	void* ptr = dr_thread_alloc(drcontext, sizeof(T));
-	DR_ASSERT(ptr);
-	if constexpr (zero) {
-		memset(ptr, 0, sizeof(T));
-	}
-	return reinterpret_cast<T*>(ptr);
+  void* ptr = dr_thread_alloc(drcontext, sizeof(T));
+  DR_ASSERT(ptr);
+  if constexpr (zero) {
+    memset(ptr, 0, sizeof(T));
+  }
+  return reinterpret_cast<T*>(ptr);
 }
 
-template<typename T>
+template <typename T>
 inline void DrThreadFree(void* drcontext, T* ptr) {
-	dr_thread_free(drcontext, reinterpret_cast<void*>(ptr), sizeof(T));
+  dr_thread_free(drcontext, reinterpret_cast<void*>(ptr), sizeof(T));
 }
 // Call DrThreadArrayFree instead!
-template<typename T>
+template <typename T>
 inline void DrThreadFree(void* context, Array<T>* ptr) = delete;
 
-template<typename T, bool zero = true>
+template <typename T, bool zero = true>
 inline Array<T> DrThreadAllocArray(void* drcontext, size_t count) {
-	void* ptr = dr_thread_alloc(drcontext, sizeof(T) * count);
-	DR_ASSERT(ptr);
-	if constexpr (zero) {
-		memset(ptr, 0, sizeof(T) * count);
-	}
-	return {count, reinterpret_cast<T*>(ptr)};
+  void* ptr = dr_thread_alloc(drcontext, sizeof(T) * count);
+  DR_ASSERT(ptr);
+  if constexpr (zero) {
+    memset(ptr, 0, sizeof(T) * count);
+  }
+  return {count, reinterpret_cast<T*>(ptr)};
 }
 
-template<typename T>
+template <typename T>
 inline void DrThreadFreeArray(void* drcontext, Array<T>* array) {
-	dr_thread_free(drcontext, reinterpret_cast<void*>(array->address), sizeof(T) * array->count);
-	*array = {};
+  dr_thread_free(drcontext, reinterpret_cast<void*>(array->address), sizeof(T) * array->count);
+  *array = {};
 }
-
 
 }  // namespace app
