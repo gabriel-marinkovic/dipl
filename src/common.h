@@ -84,7 +84,7 @@ T max(T const& a, T const& b) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// Array
+// Array definition
 ///////////////////////////////////////////////////////////////////////////////
 
 template <typename T>
@@ -135,12 +135,65 @@ struct Array {
 };
 
 template <typename T>
+constexpr bool is_array = false;
+template <typename T>
+constexpr bool is_array<Array<T>> = true;
+
+template <typename T, typename E>
+constexpr bool is_array_of = false;
+template <typename E>
+constexpr bool is_array_of<Array<E>, E> = true;
+
+///////////////////////////////////////////////////////////////////////////////
+// DynamoRIO utilities
+///////////////////////////////////////////////////////////////////////////////
+
+template <typename T, bool zero = true>
+inline T* DrThreadAlloc(void* drcontext) {
+  void* ptr = dr_thread_alloc(drcontext, sizeof(T));
+  DR_ASSERT(ptr);
+  if constexpr (zero) {
+    memset(ptr, 0, sizeof(T));
+  }
+  return reinterpret_cast<T*>(ptr);
+}
+
+template <typename T>
+inline void DrThreadFree(void* drcontext, T* ptr) {
+  dr_thread_free(drcontext, reinterpret_cast<void*>(ptr), sizeof(T));
+}
+// Call DrThreadArrayFree instead!
+template <typename T>
+inline void DrThreadFree(void* context, Array<T>* ptr) = delete;
+
+template <typename T, bool zero = true>
+inline Array<T> DrThreadAllocArray(void* drcontext, size_t count) {
+  void* ptr = dr_thread_alloc(drcontext, sizeof(T) * count);
+  DR_ASSERT(ptr);
+  if constexpr (zero) {
+    memset(ptr, 0, sizeof(T) * count);
+  }
+  return {count, reinterpret_cast<T*>(ptr)};
+}
+
+template <typename T>
+inline void DrThreadFreeArray(void* drcontext, Array<T>* array) {
+  dr_thread_free(drcontext, reinterpret_cast<void*>(array->address), sizeof(T) * array->count);
+  *array = {};
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Array utilities
+///////////////////////////////////////////////////////////////////////////////
+
+template <typename T>
 inline Array<uint8_t> AsBytes(T* value) {
   return {sizeof(T), reinterpret_cast<uint8_t*>(value)};
 }
 
 template <typename T, typename... Arrays>
-Array<T> concatenate(void* drcontext, const Array<T>& first, const Arrays&... rest) {
+  requires(is_array_of<Arrays, T> && ...)
+Array<T> ConcatenateArrays(void* drcontext, const Array<T>& first, const Arrays&... rest) {
   size_t totalCount = (first.count + ... + rest.count);
   Array<T> result = DrThreadAllocArray<T>(drcontext, totalCount);
 
@@ -162,9 +215,13 @@ Array<T> concatenate(void* drcontext, const Array<T>& first, const Arrays&... re
 
 using String = Array<uint8_t>;
 
+#define StringArgs(string) static_cast<int>((string).count), reinterpret_cast<char*>((string).address)
+
 bool IsWhitespace(uint8_t character);
 
-static String Wrap(const char* cStr);
+static inline String Wrap(const char* cStr) {
+  return {strlen(cStr), reinterpret_cast<uint8_t*>(const_cast<char*>(cStr))};
+}
 
 // Always returns a zero-terminated string.
 static String Allocate(void* drcontext, const char* cStr);
@@ -281,42 +338,6 @@ struct BufferedFileReader {
   bool ReadString(String* string);
 };
 
-///////////////////////////////////////////////////////////////////////////////
-// DynamoRIO utilities
-///////////////////////////////////////////////////////////////////////////////
-
-template <typename T, bool zero = true>
-inline T* DrThreadAlloc(void* drcontext) {
-  void* ptr = dr_thread_alloc(drcontext, sizeof(T));
-  DR_ASSERT(ptr);
-  if constexpr (zero) {
-    memset(ptr, 0, sizeof(T));
-  }
-  return reinterpret_cast<T*>(ptr);
-}
-
-template <typename T>
-inline void DrThreadFree(void* drcontext, T* ptr) {
-  dr_thread_free(drcontext, reinterpret_cast<void*>(ptr), sizeof(T));
-}
-// Call DrThreadArrayFree instead!
-template <typename T>
-inline void DrThreadFree(void* context, Array<T>* ptr) = delete;
-
-template <typename T, bool zero = true>
-inline Array<T> DrThreadAllocArray(void* drcontext, size_t count) {
-  void* ptr = dr_thread_alloc(drcontext, sizeof(T) * count);
-  DR_ASSERT(ptr);
-  if constexpr (zero) {
-    memset(ptr, 0, sizeof(T) * count);
-  }
-  return {count, reinterpret_cast<T*>(ptr)};
-}
-
-template <typename T>
-inline void DrThreadFreeArray(void* drcontext, Array<T>* array) {
-  dr_thread_free(drcontext, reinterpret_cast<void*>(array->address), sizeof(T) * array->count);
-  *array = {};
-}
+file_t OpenUniqueFile(void* drcontext, client_id_t id, String nameBase, bool read, bool write);
 
 }  // namespace app

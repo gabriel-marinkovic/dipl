@@ -47,6 +47,13 @@
 namespace app {
 
 void test(void *drcontext) {
+  String a = Wrap("abc");
+  String b = Wrap("123");
+  String c = Wrap("xyz");
+  String d = ConcatenateArrays(drcontext, a, b, c);
+  printf("%.*s\n", StringArgs(d));
+  return;
+
   const char* path = "/home/gabriel/dipl/foo.bin";
   file_t file = dr_open_file(path, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
   DR_ASSERT(file != INVALID_FILE);
@@ -79,6 +86,8 @@ void test(void *drcontext) {
 }
 
 }  // namespace app
+
+using namespace app;
 
 #define BUFFER_SIZE_ELEMENTS(a) (sizeof(a) / sizeof((a)[0]))
 #define NULL_TERMINATE_BUFFER(a) ((a)[BUFFER_SIZE_ELEMENTS(a) - 1] = '\0')
@@ -162,6 +171,8 @@ typedef struct {
   file_t log;
   FILE* logf;
   uint64 num_refs;
+
+  BufferedFileWriter writer;
 } per_thread_t;
 
 static client_id_t client_id;
@@ -200,7 +211,12 @@ static void memtrace(void* drcontext) {
     fprintf(data->logf, "" PIFX ": %2d, %s\n", (ptr_uint_t)mem_ref->addr, mem_ref->size,
             (mem_ref->type > REF_TYPE_WRITE) ? decode_opcode_name(mem_ref->type) /* opcode for instr */
                                              : (mem_ref->type == REF_TYPE_WRITE ? "w" : "r"));
+
     data->num_refs++;
+
+    data->writer.WriteUint16LE(mem_ref->type);
+    data->writer.WriteUint16LE(mem_ref->size);
+    data->writer.WriteUint64LE(reinterpret_cast<uint64_t>(reinterpret_cast<uintptr_t>(mem_ref->addr)));
   }
   BUF_PTR(data->seg_base) = data->buf_base;
 }
@@ -400,6 +416,9 @@ static void event_thread_init(void* drcontext) {
     data->logf = log_stream_from_file(data->log);
   }
   fprintf(data->logf, "Format: <data address>: <data size>, <(r)ead/(w)rite/opcode>\n");
+
+  file_t file = OpenUniqueFile(drcontext, client_id, Wrap("hello"), false, true);
+  BufferedFileWriter::Make(&data->writer, drcontext, file, 64 * 1024 * 1024);
 }
 
 static void event_thread_exit(void* drcontext) {
@@ -410,6 +429,7 @@ static void event_thread_exit(void* drcontext) {
   num_refs += data->num_refs;
   dr_mutex_unlock(mutex);
   if (!log_to_stderr) log_stream_close(data->logf); /* closes fd too */
+  data->writer.FlushAndDestroy();
   dr_raw_mem_free(data->buf_base, MEM_BUF_SIZE);
   dr_thread_free(drcontext, data, sizeof(per_thread_t));
 }

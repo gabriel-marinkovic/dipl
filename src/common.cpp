@@ -120,8 +120,6 @@ bool IsWhitespace(uint8_t character) {
   return false;
 }
 
-static String Wrap(const char* cStr) { return {strlen(cStr), reinterpret_cast<uint8_t*>(const_cast<char*>(cStr))}; }
-
 static String Allocate(void* drcontext, const char* cStr) {
   size_t len = strlen(cStr);
   String result = DrThreadAllocArray<uint8_t>(drcontext, len + 1);
@@ -436,7 +434,7 @@ void ConsumeWhitespace(String* string);
 // Filesystem
 ///////////////////////////////////////////////////////////////////////////////
 
-static file_t OpenUniqueFile(void* drcontext, client_id_t id, String nameBase, bool read, bool write) {
+file_t OpenUniqueFile(void* drcontext, client_id_t id, String nameBase, bool read, bool write) {
   String clientPath = Wrap(dr_get_client_path(id));
   String clientDir = ConsumeUntilLast(&clientPath, '/');
   String dir = Allocate(drcontext, clientDir);
