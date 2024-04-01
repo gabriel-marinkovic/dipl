@@ -445,7 +445,7 @@ file_t OpenUniqueFile(void* drcontext, client_id_t id, String nameBase, bool rea
   if (write) flags |= DR_FILE_WRITE_OVERWRITE;
 
   file_t file = drx_open_unique_appid_file(reinterpret_cast<char*>(dir.address), dr_get_process_id(),
-                                           reinterpret_cast<char*>(nameBase.address), "", flags, NULL, 0);
+                                           reinterpret_cast<char*>(nameBase.address), "bin", flags, NULL, 0);
   DR_ASSERT(file != INVALID_FILE);
   return file;
 }

@@ -19,18 +19,18 @@ void InitializeOnce() {
         globalData.push_back(i * i);
       }
       isInitialized.store(true, std::memory_order_release);
-      std::cout << "Global data initialized by thread: " << std::this_thread::get_id() << std::endl;
+      //std::cout << "Global data initialized by thread: " << std::this_thread::get_id() << std::endl;
     }
   }
 }
 
 void ThreadFunction() {
   InitializeOnce();
-  std::cout << "Thread " << std::this_thread::get_id() << " sees globalData:";
+  //std::cout << "Thread " << std::this_thread::get_id() << " sees globalData:";
   for (auto x : globalData) {
-    std::cout << " " << x;
+    //std::cout << " " << x;
   }
-  std::cout << std::endl;
+  //std::cout << std::endl;
 }
 
 int main() {

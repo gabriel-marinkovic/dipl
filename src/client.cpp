@@ -44,49 +44,6 @@
 
 #include "common.h"
 
-namespace app {
-
-void test(void *drcontext) {
-  String a = Wrap("abc");
-  String b = Wrap("123");
-  String c = Wrap("xyz");
-  String d = ConcatenateArrays(drcontext, a, b, c);
-  printf("%.*s\n", StringArgs(d));
-  return;
-
-  const char* path = "/home/gabriel/dipl/foo.bin";
-  file_t file = dr_open_file(path, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
-  DR_ASSERT(file != INVALID_FILE);
-
-  BufferedFileWriter writer;
-  BufferedFileWriter::Make(&writer, drcontext, file, 53);
-
-  for (uint32_t i = 0; i < 100; ++i) {
-    writer.WriteUint16LE(i);
-    writer.WriteUint32LE(i);
-  }
-
-  writer.FlushAndDestroy();
-
-  file = dr_open_file(path, DR_FILE_READ | DR_FILE_ALLOW_LARGE);
-  DR_ASSERT(file != INVALID_FILE);
-
-  BufferedFileReader reader;
-  BufferedFileReader::Make(&reader, drcontext, file, 28);
-
-  uint16_t value;
-  while (reader.ReadUint16LE(&value)) {
-    uint32_t value2;
-    bool ok = reader.ReadUint32LE(&value2);
-    DR_ASSERT(ok);
-    printf("!!! %d %d\n", value, value2);
-  }
-
-  reader.Destroy();
-}
-
-}  // namespace app
-
 using namespace app;
 
 #define BUFFER_SIZE_ELEMENTS(a) (sizeof(a) / sizeof((a)[0]))
@@ -168,8 +125,6 @@ struct ThreadUserdata {};
 typedef struct {
   byte* seg_base;
   mem_ref_t* buf_base;
-  file_t log;
-  FILE* logf;
   uint64 num_refs;
 
   BufferedFileWriter writer;
@@ -194,34 +149,18 @@ static int tls_idx;
 #define MINSERT instrlist_meta_preinsert
 
 static void memtrace(void* drcontext) {
-  per_thread_t* data;
-  mem_ref_t *mem_ref, *buf_ptr;
+  per_thread_t* data = (per_thread_t*)drmgr_get_tls_field(drcontext, tls_idx);
+  mem_ref_t* buf_ptr = BUF_PTR(data->seg_base);
 
-  data = (per_thread_t*)drmgr_get_tls_field(drcontext, tls_idx);
-  buf_ptr = BUF_PTR(data->seg_base);
-  /* Example of dumpped file content:
-   *   0x00007f59c2d002d3:  5, call
-   *   0x00007ffeacab0ec8:  8, w
-   */
-  /* We use libc's fprintf as it is buffered and much faster than dr_fprintf
-   * for repeated printing that dominates performance, as the printing does here.
-   */
-  for (mem_ref = (mem_ref_t*)data->buf_base; mem_ref < buf_ptr; mem_ref++) {
-    /* We use PIFX to avoid leading zeroes and shrink the resulting file. */
-    fprintf(data->logf, "" PIFX ": %2d, %s\n", (ptr_uint_t)mem_ref->addr, mem_ref->size,
-            (mem_ref->type > REF_TYPE_WRITE) ? decode_opcode_name(mem_ref->type) /* opcode for instr */
-                                             : (mem_ref->type == REF_TYPE_WRITE ? "w" : "r"));
-
-    data->num_refs++;
-
+  for (mem_ref_t* mem_ref = (mem_ref_t*)data->buf_base; mem_ref < buf_ptr; mem_ref++) {
     data->writer.WriteUint16LE(mem_ref->type);
     data->writer.WriteUint16LE(mem_ref->size);
     data->writer.WriteUint64LE(reinterpret_cast<uint64_t>(reinterpret_cast<uintptr_t>(mem_ref->addr)));
+    data->writer.WriteString(Wrap(decode_opcode_name(mem_ref->type)));
   }
   BUF_PTR(data->seg_base) = data->buf_base;
 }
 
-/* clean_call dumps the memory reference info to the log file */
 static void clean_call(void) {
   void* drcontext = dr_get_current_drcontext();
   memtrace(drcontext);
@@ -296,26 +235,6 @@ static void instrument_instr(void* drcontext, instrlist_t* ilist, instr_t* where
   instrlist_set_auto_predicate(ilist, instr_get_predicate(where));
 }
 
-/* insert inline code to add a memory reference info entry into the buffer */
-static void instrument_mem(void* drcontext, instrlist_t* ilist, instr_t* where, opnd_t ref, bool write) {
-  /* We need two scratch registers */
-  reg_id_t reg_ptr, reg_tmp;
-  if (drreg_reserve_register(drcontext, ilist, where, NULL, &reg_ptr) != DRREG_SUCCESS ||
-      drreg_reserve_register(drcontext, ilist, where, NULL, &reg_tmp) != DRREG_SUCCESS) {
-    DR_ASSERT(false); /* cannot recover */
-    return;
-  }
-  /* save_addr should be called first as reg_ptr or reg_tmp maybe used in ref */
-  insert_save_addr(drcontext, ilist, where, ref, reg_ptr, reg_tmp);
-  insert_save_type(drcontext, ilist, where, reg_ptr, reg_tmp, write ? REF_TYPE_WRITE : REF_TYPE_READ);
-  insert_save_size(drcontext, ilist, where, reg_ptr, reg_tmp, (ushort)drutil_opnd_mem_size_in_bytes(ref, where));
-  insert_update_buf_ptr(drcontext, ilist, where, reg_ptr, sizeof(mem_ref_t));
-  /* Restore scratch registers */
-  if (drreg_unreserve_register(drcontext, ilist, where, reg_ptr) != DRREG_SUCCESS ||
-      drreg_unreserve_register(drcontext, ilist, where, reg_tmp) != DRREG_SUCCESS)
-    DR_ASSERT(false);
-}
-
 /* For each memory reference app instr, we insert inline code to fill the buffer
  * with an instruction entry and memory reference entries.
  */
@@ -339,20 +258,6 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
   if (instr_operands == NULL || (!instr_reads_memory(instr_operands) && !instr_writes_memory(instr_operands)))
     return DR_EMIT_DEFAULT;
   DR_ASSERT(instr_is_app(instr_operands));
-
-  for (i = 0; i < instr_num_srcs(instr_operands); i++) {
-    const opnd_t src = instr_get_src(instr_operands, i);
-    if (opnd_is_memory_reference(src)) {
-      instrument_mem(drcontext, bb, where, src, false);
-    }
-  }
-
-  for (i = 0; i < instr_num_dsts(instr_operands); i++) {
-    const opnd_t dst = instr_get_dst(instr_operands, i);
-    if (opnd_is_memory_reference(dst)) {
-      instrument_mem(drcontext, bb, where, dst, true);
-    }
-  }
 
   /* insert code to call clean_call for processing the buffer */
   if (/* XXX i#1698: there are constraints for code between ldrex/strex pairs,
@@ -386,8 +291,6 @@ static dr_emit_flags_t event_bb_app2app(void* drcontext, void* tag, instrlist_t*
 }
 
 static void event_thread_init(void* drcontext) {
-  app::test(drcontext);
-
   per_thread_t* data = (per_thread_t*)dr_thread_alloc(drcontext, sizeof(per_thread_t));
   DR_ASSERT(data != NULL);
   drmgr_set_tls_field(drcontext, tls_idx, data);
@@ -403,21 +306,7 @@ static void event_thread_init(void* drcontext) {
 
   data->num_refs = 0;
 
-  if (log_to_stderr) {
-    data->logf = stderr;
-  } else {
-    /* We're going to dump our data to a per-thread file.
-     * On Windows we need an absolute path so we place it in
-     * the same directory as our library. We could also pass
-     * in a path as a client argument.
-     */
-    data->log = log_file_open(client_id, drcontext, NULL /* using client lib path */, "memtrace",
-                              DR_FILE_CLOSE_ON_FORK | DR_FILE_ALLOW_LARGE);
-    data->logf = log_stream_from_file(data->log);
-  }
-  fprintf(data->logf, "Format: <data address>: <data size>, <(r)ead/(w)rite/opcode>\n");
-
-  file_t file = OpenUniqueFile(drcontext, client_id, Wrap("hello"), false, true);
+  file_t file = OpenUniqueFile(drcontext, client_id, Wrap("test"), false, true);
   BufferedFileWriter::Make(&data->writer, drcontext, file, 64 * 1024 * 1024);
 }
 
@@ -428,7 +317,6 @@ static void event_thread_exit(void* drcontext) {
   dr_mutex_lock(mutex);
   num_refs += data->num_refs;
   dr_mutex_unlock(mutex);
-  if (!log_to_stderr) log_stream_close(data->logf); /* closes fd too */
   data->writer.FlushAndDestroy();
   dr_raw_mem_free(data->buf_base, MEM_BUF_SIZE);
   dr_thread_free(drcontext, data, sizeof(per_thread_t));
