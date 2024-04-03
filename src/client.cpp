@@ -156,7 +156,11 @@ static void memtrace(void* drcontext) {
     data->writer.WriteUint16LE(mem_ref->type);
     data->writer.WriteUint16LE(mem_ref->size);
     data->writer.WriteUint64LE(reinterpret_cast<uint64_t>(reinterpret_cast<uintptr_t>(mem_ref->addr)));
-    data->writer.WriteString(Wrap(decode_opcode_name(mem_ref->type)));
+    if (mem_ref->type != 0 && mem_ref->type != 1) {
+      data->writer.WriteString(Wrap(decode_opcode_name(mem_ref->type)));
+    } else {
+      data->writer.WriteUint64LE(0);
+    }
   }
   BUF_PTR(data->seg_base) = data->buf_base;
 }
@@ -235,6 +239,27 @@ static void instrument_instr(void* drcontext, instrlist_t* ilist, instr_t* where
   instrlist_set_auto_predicate(ilist, instr_get_predicate(where));
 }
 
+/* insert inline code to add a memory reference info entry into the buffer */
+static void instrument_mem(void* drcontext, instrlist_t* ilist, instr_t* where, opnd_t ref, bool write) {
+  /* We need two scratch registers */
+  reg_id_t reg_ptr, reg_tmp;
+  if (drreg_reserve_register(drcontext, ilist, where, NULL, &reg_ptr) != DRREG_SUCCESS ||
+      drreg_reserve_register(drcontext, ilist, where, NULL, &reg_tmp) != DRREG_SUCCESS) {
+    DR_ASSERT(false); /* cannot recover */
+    return;
+  }
+  /* save_addr should be called first as reg_ptr or reg_tmp maybe used in ref */
+  insert_save_addr(drcontext, ilist, where, ref, reg_ptr, reg_tmp);
+  insert_save_type(drcontext, ilist, where, reg_ptr, reg_tmp, write ? REF_TYPE_WRITE : REF_TYPE_READ);
+  insert_save_size(drcontext, ilist, where, reg_ptr, reg_tmp, (ushort)drutil_opnd_mem_size_in_bytes(ref, where));
+  insert_update_buf_ptr(drcontext, ilist, where, reg_ptr, sizeof(mem_ref_t));
+  /* Restore scratch registers */
+  if (drreg_unreserve_register(drcontext, ilist, where, reg_ptr) != DRREG_SUCCESS ||
+      drreg_unreserve_register(drcontext, ilist, where, reg_tmp) != DRREG_SUCCESS)
+    DR_ASSERT(false);
+}
+
+
 /* For each memory reference app instr, we insert inline code to fill the buffer
  * with an instruction entry and memory reference entries.
  */
@@ -258,6 +283,20 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
   if (instr_operands == NULL || (!instr_reads_memory(instr_operands) && !instr_writes_memory(instr_operands)))
     return DR_EMIT_DEFAULT;
   DR_ASSERT(instr_is_app(instr_operands));
+
+  for (i = 0; i < instr_num_srcs(instr_operands); i++) {
+    const opnd_t src = instr_get_src(instr_operands, i);
+    if (opnd_is_memory_reference(src)) {
+      instrument_mem(drcontext, bb, where, src, false);
+    }
+  }
+
+  for (i = 0; i < instr_num_dsts(instr_operands); i++) {
+    const opnd_t dst = instr_get_dst(instr_operands, i);
+    if (opnd_is_memory_reference(dst)) {
+      instrument_mem(drcontext, bb, where, dst, true);
+    }
+  }
 
   /* insert code to call clean_call for processing the buffer */
   if (/* XXX i#1698: there are constraints for code between ldrex/strex pairs,
@@ -310,6 +349,36 @@ static void event_thread_init(void* drcontext) {
   BufferedFileWriter::Make(&data->writer, drcontext, file, 64 * 1024 * 1024);
 }
 
+static void event_module_load(void* drcontext, const module_data_t* info, bool loaded) {
+  /*
+  app_pc   end
+  app_pc  entry_point
+  uint  flags
+  module_names_t  names
+  char *  full_path
+  version_number_t  file_version
+  version_number_t  product_version
+  uint  checksum
+  uint  timestamp
+  size_t  module_internal_size
+  app_pc  preferred_base
+  app_pc  start
+  module_handle_t   handle
+
+  */
+
+  // clang-format off
+  printf("MODULE LOADED (%d):\n", loaded ? 1 : 0);
+  printf("\tentry_point:    %p\n", info->entry_point);
+  printf("\tmodule_name:    %s\n", info->names.module_name);
+  printf("\tfile_name:      %s\n", info->names.file_name);
+  printf("\tpreferred_base: %p\n", info->preferred_base);
+  printf("\tstart:          %p\n", info->start);
+  printf("\tend:            %p\n", info->end);
+  printf("------------------------------------------------\n");
+  // clang-format on
+}
+
 static void event_thread_exit(void* drcontext) {
   per_thread_t* data;
   memtrace(drcontext); /* dump any remaining buffer entries */
@@ -328,7 +397,8 @@ static void event_exit(void) {
 
   if (!drmgr_unregister_tls_field(tls_idx) || !drmgr_unregister_thread_init_event(event_thread_init) ||
       !drmgr_unregister_thread_exit_event(event_thread_exit) || !drmgr_unregister_bb_app2app_event(event_bb_app2app) ||
-      !drmgr_unregister_bb_insertion_event(event_app_instruction) || drreg_exit() != DRREG_SUCCESS)
+      !drmgr_unregister_bb_insertion_event(event_app_instruction) ||
+      !drmgr_unregister_module_load_event(event_module_load) || drreg_exit() != DRREG_SUCCESS)
     DR_ASSERT(false);
 
   dr_mutex_destroy(mutex);
@@ -357,7 +427,8 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   dr_register_exit_event(event_exit);
   if (!drmgr_register_thread_init_event(event_thread_init) || !drmgr_register_thread_exit_event(event_thread_exit) ||
       !drmgr_register_bb_app2app_event(event_bb_app2app, NULL) ||
-      !drmgr_register_bb_instrumentation_event(NULL /*analysis_func*/, event_app_instruction, NULL))
+      !drmgr_register_bb_instrumentation_event(NULL /*analysis_func*/, event_app_instruction, NULL) ||
+      !drmgr_register_module_load_event(event_module_load))
     DR_ASSERT(false);
 
   client_id = id;
