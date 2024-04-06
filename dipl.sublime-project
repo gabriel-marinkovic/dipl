@@ -2,16 +2,7 @@
 	"folders":
 	[
 		{
-			"path": "example",
-		},
-		{
-			"path": "src"
-		},
-		{
-			"path": "build/dynamorio/_deps/dynamorio-build/include"
-		},
-		{
-			"path": "build/dynamorio/_deps/dynamorio-build/ext/include"
+			"path": ".",
 		},
 	],
 }
