@@ -52,50 +52,6 @@ using namespace app;
 #define SHOW_RESULTS 1
 #define DISPLAY_STRING(str) printf("%s\n", (str))
 
-file_t log_file_open(client_id_t id, void* drcontext, const char* path, const char* name, uint flags) {
-  file_t log;
-  char log_dir[MAXIMUM_PATH];
-  char buf[MAXIMUM_PATH];
-  size_t len;
-  char* dirsep;
-
-  DR_ASSERT(name != NULL);
-  len = dr_snprintf(log_dir, BUFFER_SIZE_ELEMENTS(log_dir), "%s", path == NULL ? dr_get_client_path(id) : path);
-  DR_ASSERT(len > 0);
-  NULL_TERMINATE_BUFFER(log_dir);
-  dirsep = log_dir + len - 1;
-  if (path == NULL /* removing client lib */ ||
-      /* path does not have a trailing / and is too large to add it */
-      (*dirsep != '/' && len == BUFFER_SIZE_ELEMENTS(log_dir) - 1)) {
-    for (dirsep = log_dir + len; *dirsep != '/'; dirsep--) DR_ASSERT(dirsep > log_dir);
-  }
-  /* remove trailing / if necessary */
-  if (*dirsep == '/')
-    *dirsep = 0;
-  else if (sizeof(log_dir) > (dirsep + 1 - log_dir) / sizeof(log_dir[0]))
-    *(dirsep + 1) = 0;
-  NULL_TERMINATE_BUFFER(log_dir);
-  /* we do not need call drx_init before using drx_open_unique_appid_file */
-  log = drx_open_unique_appid_file(log_dir, dr_get_process_id(), name, "log", flags, buf, BUFFER_SIZE_ELEMENTS(buf));
-  if (log != INVALID_FILE) {
-    char msg[MAXIMUM_PATH];
-    len = dr_snprintf(msg, BUFFER_SIZE_ELEMENTS(msg), "Data file %s created", buf);
-    DR_ASSERT(len > 0);
-    NULL_TERMINATE_BUFFER(msg);
-    dr_log(drcontext, DR_LOG_ALL, 1, "%s", msg);
-#ifdef SHOW_RESULTS
-    DISPLAY_STRING(msg);
-#endif
-  }
-  return log;
-}
-
-void log_file_close(file_t log) { dr_close_file(log); }
-
-FILE* log_stream_from_file(file_t f) { return fdopen(f, "w"); }
-
-void log_stream_close(FILE* f) { fclose(f); /* closes underlying fd too for all platforms */ }
-
 enum {
   REF_TYPE_READ = 0,
   REF_TYPE_WRITE = 1,
@@ -284,18 +240,50 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
     return DR_EMIT_DEFAULT;
   DR_ASSERT(instr_is_app(instr_operands));
 
+  //int opcode = instr_get_opcode(instr_fetch);
+  //bool log = (
+  //  opcode == OP_call ||
+  //  opcode == OP_call_ind ||
+  //  opcode == OP_call_far ||
+  //  opcode == OP_call_far_ind
+  //);
+  bool log = false;
+
+  int src_operands_memrefs = 0;
   for (i = 0; i < instr_num_srcs(instr_operands); i++) {
     const opnd_t src = instr_get_src(instr_operands, i);
     if (opnd_is_memory_reference(src)) {
       instrument_mem(drcontext, bb, where, src, false);
+      src_operands_memrefs++;
     }
+
+    if (log) {
+      reg_id_t reg = opnd_get_reg(src);
+      //printf("src: %s\n", get_register_name(reg));
+    }
+
   }
 
+  int dst_operands_memrefs = 0;
   for (i = 0; i < instr_num_dsts(instr_operands); i++) {
     const opnd_t dst = instr_get_dst(instr_operands, i);
     if (opnd_is_memory_reference(dst)) {
       instrument_mem(drcontext, bb, where, dst, true);
+      dst_operands_memrefs++;
     }
+
+    if (log) {
+      reg_id_t reg = opnd_get_reg(dst);
+      //printf("dst: %s\n", get_register_name(reg));
+    }
+  }
+
+  if (log) {
+    //printf(
+    //  "^^^^ call! src: %d, dst: %d, r: %d, w: %d, srcs which are memref: %d, dsts which are memref: %d\n",
+    //  instr_num_srcs(instr_operands), instr_num_dsts(instr_operands),
+    //  instr_reads_memory(instr_operands), instr_writes_memory(instr_operands),
+    //  src_operands_memrefs, dst_operands_memrefs);
   }
 
   /* insert code to call clean_call for processing the buffer */
