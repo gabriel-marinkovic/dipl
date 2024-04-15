@@ -46,73 +46,57 @@
 
 using namespace app;
 
-#define BUFFER_SIZE_ELEMENTS(a) (sizeof(a) / sizeof((a)[0]))
-#define NULL_TERMINATE_BUFFER(a) ((a)[BUFFER_SIZE_ELEMENTS(a) - 1] = '\0')
-
-#define SHOW_RESULTS 1
-#define DISPLAY_STRING(str) printf("%s\n", (str))
-
-enum {
-  REF_TYPE_READ = 0,
-  REF_TYPE_WRITE = 1,
+enum MemoryReferenceKind : uint16_t {
+  REF_KIND_READ = 0,
+  REF_KIND_WRITE = 1,
 };
-/* Each mem_ref_t is a <type, size, addr> entry representing a memory reference
- * instruction or the reference information, e.g.:
- * - mem ref instr: { type = 42 (call), size = 5, addr = 0x7f59c2d002d3 }
- * - mem ref info:  { type = 1 (write), size = 8, addr = 0x7ffeacab0ec8 }
- */
-typedef struct _mem_ref_t {
-  ushort type; /* r(0), w(1), or opcode (assuming 0/1 are invalid opcode) */
-  ushort size; /* mem ref size or instr length */
-  app_pc addr; /* mem ref addr or instr pc */
-} mem_ref_t;
+
+struct MemoryReference {
+  MemoryReferenceKind type; /* r(0), w(1), or opcode (assuming 0/1 are invalid opcode) */
+  uint16_t size;            /* mem ref size or instr length */
+  app_pc addr;              /* mem ref addr or instr pc */
+};
 
 /* Max number of mem_ref a buffer can have. It should be big enough
  * to hold all entries between clean calls.
  */
 #define MAX_NUM_MEM_REFS 4096
 /* The maximum size of buffer for holding mem_refs. */
-#define MEM_BUF_SIZE (sizeof(mem_ref_t) * MAX_NUM_MEM_REFS)
+#define MEM_BUF_SIZE (sizeof(MemoryReference) * MAX_NUM_MEM_REFS)
 
 /* thread private log file and counter */
 
-struct ThreadUserdata {};
-
-typedef struct {
-  byte* seg_base;
-  mem_ref_t* buf_base;
-  uint64 num_refs;
-
+struct ThreadData {
+  uint8_t* seg_base;
+  MemoryReference* buf_base;
+  uint64_t num_refs;
   BufferedFileWriter writer;
-} per_thread_t;
+};
 
 static client_id_t client_id;
-static void* mutex;        /* for multithread support */
-static uint64 num_refs;    /* keep a global memory reference count */
-static bool log_to_stderr; /* for testing */
+static void* mutex;       /* for multithread support */
+static uint64_t num_refs; /* keep a global memory reference count */
 
 /* Allocated TLS slot offsets */
-enum {
-  MEMTRACE_TLS_OFFS_BUF_PTR,
-  MEMTRACE_TLS_COUNT, /* total number of TLS slots allocated */
+enum TlsOffset {
+  TLS_OFFSET_BUF_PTR,
+  TLS_OFFSET__COUNT,
 };
 static reg_id_t tls_seg;
-static uint tls_offs;
+static uint32_t tls_offs;
 static int tls_idx;
-#define TLS_SLOT(tls_base, enum_val) (void**)((byte*)(tls_base) + tls_offs + (enum_val))
-#define BUF_PTR(tls_base) *(mem_ref_t**)TLS_SLOT(tls_base, MEMTRACE_TLS_OFFS_BUF_PTR)
-
-#define MINSERT instrlist_meta_preinsert
+#define TLS_SLOT(tls_base, enum_val) (void**)((uint8_t*)(tls_base) + tls_offs + (enum_val))
+#define BUF_PTR(tls_base) *(MemoryReference**)TLS_SLOT(tls_base, TLS_OFFSET_BUF_PTR)
 
 static void memtrace(void* drcontext) {
-  per_thread_t* data = (per_thread_t*)drmgr_get_tls_field(drcontext, tls_idx);
-  mem_ref_t* buf_ptr = BUF_PTR(data->seg_base);
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, tls_idx);
+  MemoryReference* buf_ptr = BUF_PTR(data->seg_base);
 
-  for (mem_ref_t* mem_ref = (mem_ref_t*)data->buf_base; mem_ref < buf_ptr; mem_ref++) {
+  for (MemoryReference* mem_ref = (MemoryReference*)data->buf_base; mem_ref < buf_ptr; mem_ref++) {
     data->writer.WriteUint16LE(mem_ref->type);
     data->writer.WriteUint16LE(mem_ref->size);
     data->writer.WriteUint64LE(reinterpret_cast<uint64_t>(reinterpret_cast<uintptr_t>(mem_ref->addr)));
-    if (mem_ref->type != 0 && mem_ref->type != 1) {
+    if (mem_ref->type != REF_KIND_READ && mem_ref->type != REF_KIND_WRITE) {
       data->writer.WriteString(Wrap(decode_opcode_name(mem_ref->type)));
     } else {
       data->writer.WriteUint64LE(0);
@@ -127,49 +111,54 @@ static void clean_call(void) {
 }
 
 static void insert_load_buf_ptr(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t reg_ptr) {
-  dr_insert_read_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + MEMTRACE_TLS_OFFS_BUF_PTR, reg_ptr);
+  dr_insert_read_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_BUF_PTR, reg_ptr);
 }
 
 static void insert_update_buf_ptr(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t reg_ptr, int adjust) {
-  MINSERT(ilist, where, XINST_CREATE_add(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT16(adjust)));
-  dr_insert_write_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + MEMTRACE_TLS_OFFS_BUF_PTR, reg_ptr);
+  instrlist_meta_preinsert(ilist, where,
+                           XINST_CREATE_add(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT16(adjust)));
+  dr_insert_write_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_BUF_PTR, reg_ptr);
 }
 
 static void insert_save_type(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t base, reg_id_t scratch,
                              ushort type) {
   scratch = reg_resize_to_opsz(scratch, OPSZ_2);
-  MINSERT(ilist, where, XINST_CREATE_load_int(drcontext, opnd_create_reg(scratch), OPND_CREATE_INT16(type)));
-  MINSERT(ilist, where,
-          XINST_CREATE_store_2bytes(drcontext, OPND_CREATE_MEM16(base, offsetof(mem_ref_t, type)),
-                                    opnd_create_reg(scratch)));
+  instrlist_meta_preinsert(ilist, where,
+                           XINST_CREATE_load_int(drcontext, opnd_create_reg(scratch), OPND_CREATE_INT16(type)));
+  instrlist_meta_preinsert(
+      ilist, where,
+      XINST_CREATE_store_2bytes(drcontext, OPND_CREATE_MEM16(base, offsetof(MemoryReference, type)),
+                                opnd_create_reg(scratch)));
 }
 
 static void insert_save_size(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t base, reg_id_t scratch,
                              ushort size) {
   scratch = reg_resize_to_opsz(scratch, OPSZ_2);
-  MINSERT(ilist, where, XINST_CREATE_load_int(drcontext, opnd_create_reg(scratch), OPND_CREATE_INT16(size)));
-  MINSERT(ilist, where,
-          XINST_CREATE_store_2bytes(drcontext, OPND_CREATE_MEM16(base, offsetof(mem_ref_t, size)),
-                                    opnd_create_reg(scratch)));
+  instrlist_meta_preinsert(ilist, where,
+                           XINST_CREATE_load_int(drcontext, opnd_create_reg(scratch), OPND_CREATE_INT16(size)));
+  instrlist_meta_preinsert(
+      ilist, where,
+      XINST_CREATE_store_2bytes(drcontext, OPND_CREATE_MEM16(base, offsetof(MemoryReference, size)),
+                                opnd_create_reg(scratch)));
 }
 
 static void insert_save_pc(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t base, reg_id_t scratch,
                            app_pc pc) {
   instrlist_insert_mov_immed_ptrsz(drcontext, (ptr_int_t)pc, opnd_create_reg(scratch), ilist, where, NULL, NULL);
-  MINSERT(ilist, where,
-          XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(base, offsetof(mem_ref_t, addr)), opnd_create_reg(scratch)));
+  instrlist_meta_preinsert(ilist, where,
+                           XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(base, offsetof(MemoryReference, addr)),
+                                              opnd_create_reg(scratch)));
 }
 
 static void insert_save_addr(void* drcontext, instrlist_t* ilist, instr_t* where, opnd_t ref, reg_id_t reg_ptr,
                              reg_id_t reg_addr) {
-  bool ok;
   /* we use reg_ptr as scratch to get addr */
-  ok = drutil_insert_get_mem_addr(drcontext, ilist, where, ref, reg_addr, reg_ptr);
+  bool ok = drutil_insert_get_mem_addr(drcontext, ilist, where, ref, reg_addr, reg_ptr);
   DR_ASSERT(ok);
   insert_load_buf_ptr(drcontext, ilist, where, reg_ptr);
-  MINSERT(
-      ilist, where,
-      XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(reg_ptr, offsetof(mem_ref_t, addr)), opnd_create_reg(reg_addr)));
+  instrlist_meta_preinsert(ilist, where,
+                           XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(reg_ptr, offsetof(MemoryReference, addr)),
+                                              opnd_create_reg(reg_addr)));
 }
 
 /* insert inline code to add an instruction entry into the buffer */
@@ -180,14 +169,14 @@ static void instrument_instr(void* drcontext, instrlist_t* ilist, instr_t* where
   instrlist_set_auto_predicate(ilist, DR_PRED_NONE);
   if (drreg_reserve_register(drcontext, ilist, where, NULL, &reg_ptr) != DRREG_SUCCESS ||
       drreg_reserve_register(drcontext, ilist, where, NULL, &reg_tmp) != DRREG_SUCCESS) {
-    DR_ASSERT(false); /* cannot recover */
+    DR_ASSERT(false);
     return;
   }
   insert_load_buf_ptr(drcontext, ilist, where, reg_ptr);
   insert_save_type(drcontext, ilist, where, reg_ptr, reg_tmp, (ushort)instr_get_opcode(instr));
   insert_save_size(drcontext, ilist, where, reg_ptr, reg_tmp, (ushort)instr_length(drcontext, instr));
   insert_save_pc(drcontext, ilist, where, reg_ptr, reg_tmp, instr_get_app_pc(instr));
-  insert_update_buf_ptr(drcontext, ilist, where, reg_ptr, sizeof(mem_ref_t));
+  insert_update_buf_ptr(drcontext, ilist, where, reg_ptr, sizeof(MemoryReference));
   /* Restore scratch registers */
   if (drreg_unreserve_register(drcontext, ilist, where, reg_ptr) != DRREG_SUCCESS ||
       drreg_unreserve_register(drcontext, ilist, where, reg_tmp) != DRREG_SUCCESS)
@@ -201,28 +190,25 @@ static void instrument_mem(void* drcontext, instrlist_t* ilist, instr_t* where, 
   reg_id_t reg_ptr, reg_tmp;
   if (drreg_reserve_register(drcontext, ilist, where, NULL, &reg_ptr) != DRREG_SUCCESS ||
       drreg_reserve_register(drcontext, ilist, where, NULL, &reg_tmp) != DRREG_SUCCESS) {
-    DR_ASSERT(false); /* cannot recover */
+    DR_ASSERT(false);
     return;
   }
   /* save_addr should be called first as reg_ptr or reg_tmp maybe used in ref */
   insert_save_addr(drcontext, ilist, where, ref, reg_ptr, reg_tmp);
-  insert_save_type(drcontext, ilist, where, reg_ptr, reg_tmp, write ? REF_TYPE_WRITE : REF_TYPE_READ);
+  insert_save_type(drcontext, ilist, where, reg_ptr, reg_tmp, write ? REF_KIND_WRITE : REF_KIND_READ);
   insert_save_size(drcontext, ilist, where, reg_ptr, reg_tmp, (ushort)drutil_opnd_mem_size_in_bytes(ref, where));
-  insert_update_buf_ptr(drcontext, ilist, where, reg_ptr, sizeof(mem_ref_t));
+  insert_update_buf_ptr(drcontext, ilist, where, reg_ptr, sizeof(MemoryReference));
   /* Restore scratch registers */
   if (drreg_unreserve_register(drcontext, ilist, where, reg_ptr) != DRREG_SUCCESS ||
       drreg_unreserve_register(drcontext, ilist, where, reg_tmp) != DRREG_SUCCESS)
     DR_ASSERT(false);
 }
 
-
 /* For each memory reference app instr, we insert inline code to fill the buffer
  * with an instruction entry and memory reference entries.
  */
 static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrlist_t* bb, instr_t* where,
                                              bool for_trace, bool translating, void* user_data) {
-  int i;
-
   /* Insert code to add an entry for each app instruction. */
   /* Use the drmgr_orig_app_instr_* interface to properly handle our own use
    * of drutil_expand_rep_string() and drx_expand_scatter_gather() (as well
@@ -240,50 +226,18 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
     return DR_EMIT_DEFAULT;
   DR_ASSERT(instr_is_app(instr_operands));
 
-  //int opcode = instr_get_opcode(instr_fetch);
-  //bool log = (
-  //  opcode == OP_call ||
-  //  opcode == OP_call_ind ||
-  //  opcode == OP_call_far ||
-  //  opcode == OP_call_far_ind
-  //);
-  bool log = false;
-
-  int src_operands_memrefs = 0;
-  for (i = 0; i < instr_num_srcs(instr_operands); i++) {
+  for (int i = 0; i < instr_num_srcs(instr_operands); i++) {
     const opnd_t src = instr_get_src(instr_operands, i);
     if (opnd_is_memory_reference(src)) {
       instrument_mem(drcontext, bb, where, src, false);
-      src_operands_memrefs++;
     }
-
-    if (log) {
-      reg_id_t reg = opnd_get_reg(src);
-      //printf("src: %s\n", get_register_name(reg));
-    }
-
   }
 
-  int dst_operands_memrefs = 0;
-  for (i = 0; i < instr_num_dsts(instr_operands); i++) {
+  for (int i = 0; i < instr_num_dsts(instr_operands); i++) {
     const opnd_t dst = instr_get_dst(instr_operands, i);
     if (opnd_is_memory_reference(dst)) {
       instrument_mem(drcontext, bb, where, dst, true);
-      dst_operands_memrefs++;
     }
-
-    if (log) {
-      reg_id_t reg = opnd_get_reg(dst);
-      //printf("dst: %s\n", get_register_name(reg));
-    }
-  }
-
-  if (log) {
-    //printf(
-    //  "^^^^ call! src: %d, dst: %d, r: %d, w: %d, srcs which are memref: %d, dsts which are memref: %d\n",
-    //  instr_num_srcs(instr_operands), instr_num_dsts(instr_operands),
-    //  instr_reads_memory(instr_operands), instr_writes_memory(instr_operands),
-    //  src_operands_memrefs, dst_operands_memrefs);
   }
 
   /* insert code to call clean_call for processing the buffer */
@@ -318,15 +272,15 @@ static dr_emit_flags_t event_bb_app2app(void* drcontext, void* tag, instrlist_t*
 }
 
 static void event_thread_init(void* drcontext) {
-  per_thread_t* data = (per_thread_t*)dr_thread_alloc(drcontext, sizeof(per_thread_t));
+  ThreadData* data = (ThreadData*)dr_thread_alloc(drcontext, sizeof(ThreadData));
   DR_ASSERT(data != NULL);
   drmgr_set_tls_field(drcontext, tls_idx, data);
 
   /* Keep seg_base in a per-thread data structure so we can get the TLS
    * slot and find where the pointer points to in the buffer.
    */
-  data->seg_base = (byte*)dr_get_dr_segment_base(tls_seg);
-  data->buf_base = (mem_ref_t*)dr_raw_mem_alloc(MEM_BUF_SIZE, DR_MEMPROT_READ | DR_MEMPROT_WRITE, NULL);
+  data->seg_base = (uint8_t*)dr_get_dr_segment_base(tls_seg);
+  data->buf_base = (MemoryReference*)dr_raw_mem_alloc(MEM_BUF_SIZE, DR_MEMPROT_READ | DR_MEMPROT_WRITE, NULL);
   DR_ASSERT(data->seg_base != NULL && data->buf_base != NULL);
   /* put buf_base to TLS as starting buf_ptr */
   BUF_PTR(data->seg_base) = data->buf_base;
@@ -338,24 +292,6 @@ static void event_thread_init(void* drcontext) {
 }
 
 static void event_module_load(void* drcontext, const module_data_t* info, bool loaded) {
-  /*
-  app_pc   end
-  app_pc  entry_point
-  uint  flags
-  module_names_t  names
-  char *  full_path
-  version_number_t  file_version
-  version_number_t  product_version
-  uint  checksum
-  uint  timestamp
-  size_t  module_internal_size
-  app_pc  preferred_base
-  app_pc  start
-  module_handle_t   handle
-
-  */
-
-  // clang-format off
   printf("MODULE LOADED (%d):\n", loaded ? 1 : 0);
   printf("\tentry_point:    %p\n", info->entry_point);
   printf("\tmodule_name:    %s\n", info->names.module_name);
@@ -364,24 +300,22 @@ static void event_module_load(void* drcontext, const module_data_t* info, bool l
   printf("\tstart:          %p\n", info->start);
   printf("\tend:            %p\n", info->end);
   printf("------------------------------------------------\n");
-  // clang-format on
 }
 
 static void event_thread_exit(void* drcontext) {
-  per_thread_t* data;
   memtrace(drcontext); /* dump any remaining buffer entries */
-  data = (per_thread_t*)drmgr_get_tls_field(drcontext, tls_idx);
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, tls_idx);
   dr_mutex_lock(mutex);
   num_refs += data->num_refs;
   dr_mutex_unlock(mutex);
   data->writer.FlushAndDestroy();
   dr_raw_mem_free(data->buf_base, MEM_BUF_SIZE);
-  dr_thread_free(drcontext, data, sizeof(per_thread_t));
+  dr_thread_free(drcontext, data, sizeof(ThreadData));
 }
 
 static void event_exit(void) {
   dr_log(NULL, DR_LOG_ALL, 1, "Client 'memtrace' num refs seen: " SZFMT "\n", num_refs);
-  if (!dr_raw_tls_cfree(tls_offs, MEMTRACE_TLS_COUNT)) DR_ASSERT(false);
+  if (!dr_raw_tls_cfree(tls_offs, TLS_OFFSET__COUNT)) DR_ASSERT(false);
 
   if (!drmgr_unregister_tls_field(tls_idx) || !drmgr_unregister_thread_init_event(event_thread_init) ||
       !drmgr_unregister_thread_exit_event(event_thread_exit) || !drmgr_unregister_bb_app2app_event(event_bb_app2app) ||
@@ -400,18 +334,8 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   drreg_options_t ops = {sizeof(ops), 3, false};
   dr_set_client_name("DynamoRIO Sample Client 'memtrace'", "http://dynamorio.org/issues");
 
-  if (argc > 1) {
-    if (argc == 2 && strcmp(argv[1], "-log_to_stderr") == 0)
-      log_to_stderr = true;
-    else {
-      dr_fprintf(STDERR, "Error: unknown options: only -log_to_stderr is supported\n");
-      dr_abort();
-    }
-  }
-
   if (!drmgr_init() || drreg_init(&ops) != DRREG_SUCCESS || !drutil_init() || !drx_init()) DR_ASSERT(false);
 
-  /* register events */
   dr_register_exit_event(event_exit);
   if (!drmgr_register_thread_init_event(event_thread_init) || !drmgr_register_thread_exit_event(event_thread_exit) ||
       !drmgr_register_bb_app2app_event(event_bb_app2app, NULL) ||
@@ -428,7 +352,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
    * For better performance, we allocate raw TLS so that we can directly
    * access and update it with a single instruction.
    */
-  if (!dr_raw_tls_calloc(&tls_seg, &tls_offs, MEMTRACE_TLS_COUNT, 0)) DR_ASSERT(false);
+  if (!dr_raw_tls_calloc(&tls_seg, &tls_offs, TLS_OFFSET__COUNT, 0)) DR_ASSERT(false);
 
   /* make it easy to tell, by looking at log file, which client executed */
   dr_log(NULL, DR_LOG_ALL, 1, "Client 'memtrace' initializing\n");
