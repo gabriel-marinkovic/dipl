@@ -73,9 +73,13 @@ struct ThreadData {
   BufferedFileWriter writer;
 };
 
-static client_id_t client_id;
-static void* mutex;       /* for multithread support */
-static uint64_t num_refs; /* keep a global memory reference count */
+static void* the_mutex;
+static client_id_t the_client_id;
+static uint64_t the_total_memory_reference_count;
+
+static void* the_module_mutex;
+static BufferedFileWriter the_module_writer;
+
 
 /* Allocated TLS slot offsets */
 enum TlsOffset {
@@ -84,12 +88,12 @@ enum TlsOffset {
 };
 static reg_id_t tls_seg;
 static uint32_t tls_offs;
-static int tls_idx;
+static int the_tls_idx;
 #define TLS_SLOT(tls_base, enum_val) (void**)((uint8_t*)(tls_base) + tls_offs + (enum_val))
 #define BUF_PTR(tls_base) *(MemoryReference**)TLS_SLOT(tls_base, TLS_OFFSET_BUF_PTR)
 
 static void memtrace(void* drcontext) {
-  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, tls_idx);
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   MemoryReference* buf_ptr = BUF_PTR(data->seg_base);
 
   for (MemoryReference* mem_ref = (MemoryReference*)data->buf_base; mem_ref < buf_ptr; mem_ref++) {
@@ -274,7 +278,7 @@ static dr_emit_flags_t event_bb_app2app(void* drcontext, void* tag, instrlist_t*
 static void event_thread_init(void* drcontext) {
   ThreadData* data = (ThreadData*)dr_thread_alloc(drcontext, sizeof(ThreadData));
   DR_ASSERT(data != NULL);
-  drmgr_set_tls_field(drcontext, tls_idx, data);
+  drmgr_set_tls_field(drcontext, the_tls_idx, data);
 
   /* Keep seg_base in a per-thread data structure so we can get the TLS
    * slot and find where the pointer points to in the buffer.
@@ -287,43 +291,47 @@ static void event_thread_init(void* drcontext) {
 
   data->num_refs = 0;
 
-  file_t file = OpenUniqueFile(drcontext, client_id, Wrap("test"), false, true);
+  file_t file = OpenUniqueFile(drcontext, the_client_id, Wrap("test"), Wrap("bin"), false, true);
   BufferedFileWriter::Make(&data->writer, drcontext, file, 64 * 1024 * 1024);
 }
 
 static void event_module_load(void* drcontext, const module_data_t* info, bool loaded) {
-  printf("MODULE LOADED (%d):\n", loaded ? 1 : 0);
-  printf("\tentry_point:    %p\n", info->entry_point);
-  printf("\tmodule_name:    %s\n", info->names.module_name);
-  printf("\tfile_name:      %s\n", info->names.file_name);
-  printf("\tpreferred_base: %p\n", info->preferred_base);
-  printf("\tstart:          %p\n", info->start);
-  printf("\tend:            %p\n", info->end);
-  printf("------------------------------------------------\n");
+  dr_mutex_lock(the_module_mutex);
+  Defer(dr_mutex_unlock(the_module_mutex));
+
+  the_module_writer.WriteUint8LE(loaded ? 1 : 0);
+  the_module_writer.WriteUint64LE(reinterpret_cast<uintptr_t>(info->entry_point));
+  the_module_writer.WriteUint64LE(reinterpret_cast<uintptr_t>(info->preferred_base));
+  the_module_writer.WriteUint64LE(reinterpret_cast<uintptr_t>(info->start));
+  the_module_writer.WriteUint64LE(reinterpret_cast<uintptr_t>(info->end));
+  the_module_writer.WriteString(Wrap(dr_module_preferred_name(info)));
+  the_module_writer.WriteString(Wrap(info->full_path));
 }
 
 static void event_thread_exit(void* drcontext) {
   memtrace(drcontext); /* dump any remaining buffer entries */
-  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, tls_idx);
-  dr_mutex_lock(mutex);
-  num_refs += data->num_refs;
-  dr_mutex_unlock(mutex);
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+  dr_mutex_lock(the_mutex);
+  the_total_memory_reference_count += data->num_refs;
+  dr_mutex_unlock(the_mutex);
   data->writer.FlushAndDestroy();
   dr_raw_mem_free(data->buf_base, MEM_BUF_SIZE);
   dr_thread_free(drcontext, data, sizeof(ThreadData));
 }
 
 static void event_exit(void) {
-  dr_log(NULL, DR_LOG_ALL, 1, "Client 'memtrace' num refs seen: " SZFMT "\n", num_refs);
+  dr_log(NULL, DR_LOG_ALL, 1, "Client 'memtrace' num refs seen: %llu\n", the_total_memory_reference_count);
   if (!dr_raw_tls_cfree(tls_offs, TLS_OFFSET__COUNT)) DR_ASSERT(false);
 
-  if (!drmgr_unregister_tls_field(tls_idx) || !drmgr_unregister_thread_init_event(event_thread_init) ||
+  if (!drmgr_unregister_tls_field(the_tls_idx) || !drmgr_unregister_thread_init_event(event_thread_init) ||
       !drmgr_unregister_thread_exit_event(event_thread_exit) || !drmgr_unregister_bb_app2app_event(event_bb_app2app) ||
       !drmgr_unregister_bb_insertion_event(event_app_instruction) ||
       !drmgr_unregister_module_load_event(event_module_load) || drreg_exit() != DRREG_SUCCESS)
     DR_ASSERT(false);
 
-  dr_mutex_destroy(mutex);
+  the_module_writer.FlushAndDestroy();
+  dr_mutex_destroy(the_mutex);
+  dr_mutex_destroy(the_module_mutex);
   drutil_exit();
   drmgr_exit();
   drx_exit();
@@ -343,11 +351,17 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
       !drmgr_register_module_load_event(event_module_load))
     DR_ASSERT(false);
 
-  client_id = id;
-  mutex = dr_mutex_create();
+  the_client_id = id;
+  the_mutex = dr_mutex_create();
+  the_module_mutex = dr_mutex_create();
 
-  tls_idx = drmgr_register_tls_field();
-  DR_ASSERT(tls_idx != -1);
+
+  file_t module_file = OpenUniqueFile(nullptr, the_client_id, Wrap("module"), Wrap("module"), false, true);
+  BufferedFileWriter::Make(&the_module_writer, nullptr, module_file, 1024);
+
+
+  the_tls_idx = drmgr_register_tls_field();
+  DR_ASSERT(the_tls_idx != -1);
   /* The TLS field provided by DR cannot be directly accessed from the code cache.
    * For better performance, we allocate raw TLS so that we can directly
    * access and update it with a single instruction.

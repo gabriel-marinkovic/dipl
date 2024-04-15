@@ -168,7 +168,12 @@ inline void DrThreadFree(void* context, Array<T>* ptr) = delete;
 
 template <typename T, bool zero = true>
 inline Array<T> DrThreadAllocArray(void* drcontext, size_t count) {
-  void* ptr = dr_thread_alloc(drcontext, sizeof(T) * count);
+  void* ptr = nullptr;
+  if (drcontext) {
+    ptr = dr_thread_alloc(drcontext, sizeof(T) * count);
+  } else {
+    ptr = dr_global_alloc(sizeof(T) * count);
+  }
   DR_ASSERT(ptr);
   if constexpr (zero) {
     memset(ptr, 0, sizeof(T) * count);
@@ -178,7 +183,11 @@ inline Array<T> DrThreadAllocArray(void* drcontext, size_t count) {
 
 template <typename T>
 inline void DrThreadFreeArray(void* drcontext, Array<T>* array) {
-  dr_thread_free(drcontext, reinterpret_cast<void*>(array->address), sizeof(T) * array->count);
+  if (drcontext) {
+    dr_thread_free(drcontext, reinterpret_cast<void*>(array->address), sizeof(T) * array->count);
+  } else {
+    dr_global_free(reinterpret_cast<void*>(array->address), sizeof(T) * array->count);
+  }
   *array = {};
 }
 
@@ -220,7 +229,7 @@ using String = Array<uint8_t>;
 bool IsWhitespace(uint8_t character);
 
 static inline String Wrap(const char* cStr) {
-  return {strlen(cStr), reinterpret_cast<uint8_t*>(const_cast<char*>(cStr))};
+  return {cStr ? strlen(cStr) : 0, reinterpret_cast<uint8_t*>(const_cast<char*>(cStr))};
 }
 
 // Always returns a zero-terminated string.
@@ -338,6 +347,6 @@ struct BufferedFileReader {
   bool ReadString(String* string);
 };
 
-file_t OpenUniqueFile(void* drcontext, client_id_t id, String nameBase, bool read, bool write);
+file_t OpenUniqueFile(void* drcontext, client_id_t id, String nameBase, String extension, bool read, bool write);
 
 }  // namespace app

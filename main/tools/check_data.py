@@ -17,6 +17,14 @@ def run_command(command_name, *args):
 def fa(addr):
     return f"{addr:#0{18}x}"
 
+
+def read_packed_string(file):
+    size_format = "<Q"
+    size_bytes = file.read(struct.calcsize(size_format))
+    size, = struct.unpack(size_format, size_bytes)
+    return file.read(size).decode("utf-8")
+
+
 @dataclasses.dataclass(frozen=True)
 class Operand:
     is_read: bool
@@ -33,7 +41,6 @@ class Instruction:
     addresses_read: FrozenSet[int]
     addresses_written: FrozenSet[int]
     addresses_touched: FrozenSet[int]
-
 
 @dataclasses.dataclass
 class InstructionWIP:
@@ -63,7 +70,6 @@ class InstructionWIP:
             addresses_touched=frozenset(addr_r | addr_w),
         )
 
-
 @dataclasses.dataclass(frozen=True)
 class ThreadAccess:
     thread_idx: int
@@ -72,15 +78,55 @@ class ThreadAccess:
     read_addrs: FrozenSet[int]
     write_addrs: FrozenSet[int]
 
+@dataclasses.dataclass(frozen=True)
+class Module:
+    preferred_name: str
+    path: str
+    preferred_base: int
+    base: int
+    size: int
+    entry_point: int
 
-# Dict[int, Dict[int, Tuple[Tuple[Tuple[]]]]]
+def parse_modules(directory) -> Tuple[Module]:
+    modules = {}
+    for filename in os.listdir(directory):
+        if not filename.endswith(".module"):
+            continue
+        file_path = os.path.join(directory_path, filename)
+
+        record_format = "<BQQQQ"
+        record_size = struct.calcsize(record_format)
+        with open(file_path, "rb") as file:
+            while True:
+                record_bytes = file.read(record_size)
+                if not record_bytes:
+                    break
+
+                loaded, entry_point, preferred_base, start, end = struct.unpack(record_format, record_bytes)
+                module = Module(
+                    entry_point=entry_point,
+                    preferred_base=preferred_base,
+                    base=start,
+                    size=end - start,
+                    preferred_name=read_packed_string(file),
+                    path=read_packed_string(file),
+                )
+                assert module.size >= 0
+                if loaded:
+                    modules[module.base] = module
+                else:
+                    modules.pop(module.base, None)
+    return tuple(modules.values())
+
+
+
 def process_file(
     thread_idxs_from_instr: Dict[Instruction, Set[int]],
     thread_accesses: Set[ThreadAccess],
     thread_idx: int,
     file_path: str,
 ):
-    record_format = "<HHQQ"
+    record_format = "<HHQ"
     record_size = struct.calcsize(record_format)
 
     def push_instr(instr):
@@ -104,13 +150,14 @@ def process_file(
             if not record_bytes:
                 break
 
-            opcode, size, addr, opcode_name_length = struct.unpack(record_format, record_bytes)
+            opcode, size, addr = struct.unpack(record_format, record_bytes)
+            opcode_name = read_packed_string(file)
 
             is_instruction = (opcode != 0 and opcode != 1)
             if is_instruction:
                 push_instr(instr)
                 instr = InstructionWIP(
-                    name=file.read(opcode_name_length).decode("utf-8"),
+                    name=opcode_name,
                     address=addr,
                     size=size,
                 )
@@ -118,7 +165,7 @@ def process_file(
                     instr.name = "<UNKNOWN>"
             else:
                 assert instr
-                assert opcode_name_length == 0
+                assert len(opcode_name) == 0
                 op = Operand(is_read=(opcode == 0), address=addr, size=size)
                 if op.is_read:
                     instr.src_ops.append(op)
@@ -127,6 +174,9 @@ def process_file(
         push_instr(instr)
 
 directory_path = "build/src"
+
+modules = parse_modules(directory_path)
+
 thread_idxs_from_instr: Dict[Instruction, Set[Tuple[int, bool]]] = collections.defaultdict(set)
 thread_accesses: Set[ThreadAccess] = set()
 for thread_idx, filename in enumerate(os.listdir(directory_path)):
@@ -141,7 +191,6 @@ for thread_idx, filename in enumerate(os.listdir(directory_path)):
 
 print(len(thread_idxs_from_instr))
 print(len(thread_accesses))
-
 
 shared_memory = set()
 for a1 in thread_accesses:
@@ -159,34 +208,28 @@ for instr in thread_idxs_from_instr.keys():
 print(len(truly_shared_instruction_addresses))
 print("----------------------------------------")
 
-module_starts = sorted([
-    (0x0, "build/example/double_checked_locking"),
-    (0x72000000, "/lib64/libclient.so"),
-    (0x7fd562200000, "/lib64/libdynamorio.so"),
-    (0x7fd5624e0000, "/lib64/ld-linux-x86-64.so.2"),
-    (0x7fff41b78000, "/lib64/[vdso]"),
-    (0x7fd36143b000, "/lib64/libc.so.6"),
-    (0x7fd56203d000, "/lib64/libm.so.6"),
-    (0x7fd562447000, "/lib64/libgcc_s-13-20240316.so.1"),
-    (0x7fd361c00000, "/lib64/libstdc++.so.6.0.32"),
-])
+for module in modules:
+    print(module.preferred_name, module.base)
+
 to_resolve = []
 for addr, name in sorted(truly_shared_instruction_addresses):
     min_addr = float("inf")
     min_idx = -1
-    for i in range(len(module_starts)):
-        a = addr - module_starts[i][0]
-        if a < 0:
+    for i in range(len(modules)):
+        offset = addr - modules[i].base
+        if offset < 0:
             continue
-        if min_addr > a:
-            min_addr = a
+        if min_addr > offset:
+            min_addr = offset
             min_idx = i
-    module_start, module_path = module_starts[min_idx]
-    offset = addr - module_start
-    to_resolve.append((name, module_path, offset))
-    print("{: <48}{: <12}0x{:x}".format(module_path, name, offset))
+
+    module = modules[min_idx]
+    offset = addr - module.base
+    to_resolve.append((name, module, offset))
+    print("{: <48}{: <12}0x{:x}".format(module.path, name, offset))
 
 print("----------------------------------------")
-for instr_name, module_path, offset in to_resolve:
-    run_command("addr2line", "-Cfiape", module_path, f"0x{offset:x}")
+for instr_name, module, offset in to_resolve:
+    offset += module.preferred_base
+    run_command("addr2line", "-Ciape", module.path, f"0x{offset:x}")
     print("")
