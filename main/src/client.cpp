@@ -91,7 +91,7 @@ enum TlsOffset {
 static reg_id_t tls_seg;
 static uint32_t tls_offs;
 static int the_tls_idx;
-#define TLS_SLOT(tls_base, enum_val) (void**)((uint8_t*)(tls_base) + tls_offs + (enum_val))
+#define TLS_SLOT(tls_base, enum_val) (void**)((uint8_t*)(tls_base) + tls_offs + (enum_val) * sizeof(void*))
 #define BUF_PTR(tls_base) *(MemoryReference**)TLS_SLOT(tls_base, TLS_OFFSET_BUF_PTR)
 #define IS_INSTRUMENTING(tls_base) *(uintptr_t*)TLS_SLOT(tls_base, TLS_OFFSET_IS_INSTRUMENTING)
 
@@ -362,7 +362,7 @@ static void event_thread_exit(void* drcontext) {
   dr_mutex_lock(the_mutex);
   the_total_memory_reference_count += data->num_refs;
   uint64_t count = reinterpret_cast<uint64_t>(IS_INSTRUMENTING(data->seg_base));
-  //printf("FUNCTION CALL COUNT: %lu\n", count);
+  printf("FUNCTION CALL COUNT: %lu\n", count);
   dr_mutex_unlock(the_mutex);
   data->writer.FlushAndDestroy();
 
