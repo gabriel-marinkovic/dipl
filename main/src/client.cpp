@@ -118,17 +118,21 @@ static void clean_call(void) {
 }
 
 static void insert_load_buf_ptr(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t reg_ptr) {
-  dr_insert_read_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_BUF_PTR, reg_ptr);
+  dr_insert_read_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_BUF_PTR * sizeof(void*), reg_ptr);
 }
 
 static void insert_update_buf_ptr(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t reg_ptr, int adjust) {
   instrlist_meta_preinsert(ilist, where,
                            XINST_CREATE_add(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT16(adjust)));
-  dr_insert_write_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_BUF_PTR, reg_ptr);
+  dr_insert_write_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_BUF_PTR * sizeof(void*), reg_ptr);
 }
 
 static void insert_load_is_instrumenting(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t reg_ptr) {
-  dr_insert_read_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_IS_INSTRUMENTING, reg_ptr);
+  dr_insert_read_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_IS_INSTRUMENTING * sizeof(void*), reg_ptr);
+}
+
+static void insert_update_is_instrumenting(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t reg_ptr) {
+  dr_insert_write_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_IS_INSTRUMENTING * sizeof(void*), reg_ptr);
 }
 
 static void insert_save_type(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t base, reg_id_t scratch,
@@ -173,30 +177,22 @@ static void insert_save_addr(void* drcontext, instrlist_t* ilist, instr_t* where
 }
 
 static void insert_check_if_special_control_transfer_target(void* drcontext, instrlist_t* ilist, instr_t* where,
-                                                            opnd_t ref, reg_id_t reg_ptr, reg_id_t reg_addr) {
+                                                            opnd_t target, reg_id_t reg_ptr, reg_id_t reg_addr) {
   // We use reg_ptr as scratch to get addr.
-  bool ok = drutil_insert_get_mem_addr(drcontext, ilist, where, ref, reg_addr, reg_ptr);
+  bool ok = drutil_insert_get_mem_addr(drcontext, ilist, where, target, reg_addr, reg_ptr);
   DR_ASSERT(ok);
 
-  instr_t* label_do_the_thing = INSTR_CREATE_label(drcontext);
-  instr_t* label_skip = INSTR_CREATE_label(drcontext);
+  //instr_t* label_do_the_thing = INSTR_CREATE_label(drcontext);
+  //instr_t* label_skip = INSTR_CREATE_label(drcontext);
 
-  instrlist_meta_preinsert(ilist, where,
-                           XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_addr),
-                                            opnd_create_immed_uint(the_begin_instrumentation_address,
-                                                                   sizeof(the_begin_instrumentation_address))));
-
-  instrlist_meta_preinsert(ilist, where,
-                           XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(label_do_the_thing)));
-  instrlist_meta_preinsert(ilist, where, XINST_CREATE_jump(drcontext, opnd_create_instr(label_skip)));
-
-  instrlist_meta_preinsert(ilist, where, label_do_the_thing);
-
+  //instrlist_meta_preinsert(ilist, where, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_addr), OPND_CREATE_INTPTR(the_begin_instrumentation_address)));
+  //instrlist_meta_preinsert(ilist, where, XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(label_do_the_thing)));
+  //instrlist_meta_preinsert(ilist, where, XINST_CREATE_jump(drcontext, opnd_create_instr(label_skip)));
+  //instrlist_meta_preinsert(ilist, where, label_do_the_thing);
   insert_load_is_instrumenting(drcontext, ilist, where, reg_ptr);
-
-  instrlist_meta_preinsert(ilist, where, INSTR_CREATE_inc(drcontext, OPND_CREATE_MEMPTR(reg_ptr, 0)));
-
-  instrlist_meta_preinsert(ilist, where, label_skip);
+  instrlist_meta_preinsert(ilist, where, XINST_CREATE_add(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(1)));
+  insert_update_is_instrumenting(drcontext, ilist, where, reg_ptr);
+  //instrlist_meta_preinsert(ilist, where, label_skip);
 }
 
 /* insert inline code to add an instruction entry into the buffer */
@@ -242,7 +238,22 @@ static void instrument_mem(void* drcontext, instrlist_t* ilist, instr_t* where, 
     DR_ASSERT(false);
 }
 
-static void instrument_control_transfer_instr(void* drcontext, instrlist_t* ilist, instr_t* where, opnd_t target) {}
+static void instrument_control_transfer_instr(void* drcontext, instrlist_t* ilist, instr_t* where, opnd_t target) {
+  /* We need two scratch registers */
+  reg_id_t reg_ptr, reg_tmp;
+  if (drreg_reserve_register(drcontext, ilist, where, NULL, &reg_ptr) != DRREG_SUCCESS ||
+      drreg_reserve_register(drcontext, ilist, where, NULL, &reg_tmp) != DRREG_SUCCESS) {
+    DR_ASSERT(false);
+    return;
+  }
+
+  insert_check_if_special_control_transfer_target(drcontext, ilist, where, target, reg_ptr, reg_tmp);
+
+  /* Restore scratch registers */
+  if (drreg_unreserve_register(drcontext, ilist, where, reg_ptr) != DRREG_SUCCESS ||
+      drreg_unreserve_register(drcontext, ilist, where, reg_tmp) != DRREG_SUCCESS)
+    DR_ASSERT(false);
+}
 
 /* For each memory reference app instr, we insert inline code to fill the buffer
  * with an instruction entry and memory reference entries.
@@ -272,6 +283,7 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
   if (is_cti) {
     const opnd_t target = instr_get_target(instr_operands);
     if (opnd_is_memory_reference(target)) {
+      instrument_control_transfer_instr(drcontext, bb, where, target);
     }
   }
 
@@ -387,6 +399,8 @@ static void event_exit(void) {
   drmgr_exit();
   drx_exit();
   drsym_exit();
+
+  printf("we done\n");
 }
 
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
@@ -439,7 +453,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
    * For better performance, we allocate raw TLS so that we can directly
    * access and update it with a single instruction.
    */
-  if (!dr_raw_tls_calloc(&tls_seg, &tls_offs, TLS_OFFSET__COUNT, 0)) DR_ASSERT(false);
+  if (!dr_raw_tls_calloc(&tls_seg, &tls_offs, TLS_OFFSET__COUNT, alignof(void*))) DR_ASSERT(false);
 
   /* make it easy to tell, by looking at log file, which client executed */
   dr_log(NULL, DR_LOG_ALL, 1, "Client 'memtrace' initializing\n");
