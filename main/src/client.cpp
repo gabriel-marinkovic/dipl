@@ -128,11 +128,13 @@ static void insert_update_buf_ptr(void* drcontext, instrlist_t* ilist, instr_t* 
 }
 
 static void insert_load_is_instrumenting(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t reg_ptr) {
-  dr_insert_read_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_IS_INSTRUMENTING * sizeof(void*), reg_ptr);
+  dr_insert_read_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_IS_INSTRUMENTING * sizeof(void*),
+                         reg_ptr);
 }
 
 static void insert_update_is_instrumenting(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t reg_ptr) {
-  dr_insert_write_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_IS_INSTRUMENTING * sizeof(void*), reg_ptr);
+  dr_insert_write_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_IS_INSTRUMENTING * sizeof(void*),
+                          reg_ptr);
 }
 
 static void insert_save_type(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t base, reg_id_t scratch,
@@ -178,21 +180,56 @@ static void insert_save_addr(void* drcontext, instrlist_t* ilist, instr_t* where
 
 static void insert_check_if_special_control_transfer_target(void* drcontext, instrlist_t* ilist, instr_t* where,
                                                             opnd_t target, reg_id_t reg_ptr, reg_id_t reg_addr) {
-  // We use reg_ptr as scratch to get addr.
-  bool ok = drutil_insert_get_mem_addr(drcontext, ilist, where, target, reg_addr, reg_ptr);
-  DR_ASSERT(ok);
+  if (opnd_is_memory_reference(target)) {
+      // We use reg_ptr as scratch to get addr.
+    bool ok = drutil_insert_get_mem_addr(drcontext, ilist, where, target, reg_addr, reg_ptr);
+    DR_ASSERT(ok);
 
-  //instr_t* label_do_the_thing = INSTR_CREATE_label(drcontext);
-  //instr_t* label_skip = INSTR_CREATE_label(drcontext);
+    instr_t* label_do_the_thing = INSTR_CREATE_label(drcontext);
+    instr_t* label_skip = INSTR_CREATE_label(drcontext);
 
-  //instrlist_meta_preinsert(ilist, where, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_addr), OPND_CREATE_INTPTR(the_begin_instrumentation_address)));
-  //instrlist_meta_preinsert(ilist, where, XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(label_do_the_thing)));
-  //instrlist_meta_preinsert(ilist, where, XINST_CREATE_jump(drcontext, opnd_create_instr(label_skip)));
-  //instrlist_meta_preinsert(ilist, where, label_do_the_thing);
+    // test, store/restore state
+    uint32_t test = (uint32_t)the_begin_instrumentation_address;
+    instrlist_meta_preinsert(ilist, where,
+                             XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_addr), OPND_CREATE_INT32(test)));
+    instrlist_meta_preinsert(ilist, where,
+                             XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(label_do_the_thing)));
+    instrlist_meta_preinsert(ilist, where, XINST_CREATE_jump(drcontext, opnd_create_instr(label_skip)));
+    instrlist_meta_preinsert(ilist, where, label_do_the_thing);
+    insert_load_is_instrumenting(drcontext, ilist, where, reg_ptr);
+    instrlist_meta_preinsert(ilist, where, XINST_CREATE_add(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(1)));
+    insert_update_is_instrumenting(drcontext, ilist, where, reg_ptr);
+    instrlist_meta_preinsert(ilist, where, label_skip);
+  } else if (opnd_is_pc(target)) {
+    uintptr_t address = reinterpret_cast<uintptr_t>(opnd_get_pc(target));
+    if (address == the_begin_instrumentation_address || address == the_end_instrumentation_address) {
+      IS_INSTRUMENTING(dr_get_dr_segment_base(tls_seg)) += 1;
+      printf("tls_seg: %d\n", tls_seg);
+    }
+  } else if (opnd_is_immed(target)) {
+    uint64_t address = opnd_get_immed_int64(target);
+    if (address == the_begin_instrumentation_address || address == the_end_instrumentation_address) {
+      IS_INSTRUMENTING(dr_get_dr_segment_base(tls_seg)) += 1;
+    }
+  } else {
+    DR_ASSERT(false);
+  }
+
+  instr_t* label_do_the_thing = INSTR_CREATE_label(drcontext);
+  instr_t* label_skip = INSTR_CREATE_label(drcontext);
+
+  // test, store/restore state
+  uint32_t test = (uint32_t)the_begin_instrumentation_address;
+  instrlist_meta_preinsert(ilist, where,
+                           XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_addr), OPND_CREATE_INT32(test)));
+  instrlist_meta_preinsert(ilist, where,
+                           XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(label_do_the_thing)));
+  instrlist_meta_preinsert(ilist, where, XINST_CREATE_jump(drcontext, opnd_create_instr(label_skip)));
+  instrlist_meta_preinsert(ilist, where, label_do_the_thing);
   insert_load_is_instrumenting(drcontext, ilist, where, reg_ptr);
   instrlist_meta_preinsert(ilist, where, XINST_CREATE_add(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(1)));
   insert_update_is_instrumenting(drcontext, ilist, where, reg_ptr);
-  //instrlist_meta_preinsert(ilist, where, label_skip);
+  instrlist_meta_preinsert(ilist, where, label_skip);
 }
 
 /* insert inline code to add an instruction entry into the buffer */
@@ -242,7 +279,8 @@ static void instrument_control_transfer_instr(void* drcontext, instrlist_t* ilis
   /* We need two scratch registers */
   reg_id_t reg_ptr, reg_tmp;
   if (drreg_reserve_register(drcontext, ilist, where, NULL, &reg_ptr) != DRREG_SUCCESS ||
-      drreg_reserve_register(drcontext, ilist, where, NULL, &reg_tmp) != DRREG_SUCCESS) {
+      drreg_reserve_register(drcontext, ilist, where, NULL, &reg_tmp) != DRREG_SUCCESS ||
+      drreg_reserve_aflags(drcontext, ilist, where) != DRREG_SUCCESS) {
     DR_ASSERT(false);
     return;
   }
@@ -251,7 +289,8 @@ static void instrument_control_transfer_instr(void* drcontext, instrlist_t* ilis
 
   /* Restore scratch registers */
   if (drreg_unreserve_register(drcontext, ilist, where, reg_ptr) != DRREG_SUCCESS ||
-      drreg_unreserve_register(drcontext, ilist, where, reg_tmp) != DRREG_SUCCESS)
+      drreg_unreserve_register(drcontext, ilist, where, reg_tmp) != DRREG_SUCCESS ||
+      drreg_unreserve_aflags(drcontext, ilist, where) != DRREG_SUCCESS)
     DR_ASSERT(false);
 }
 
@@ -265,11 +304,9 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
    * of drutil_expand_rep_string() and drx_expand_scatter_gather() (as well
    * as another client/library emulating the instruction stream).
    */
-  bool is_cti = false;
   instr_t* instr_fetch = drmgr_orig_app_instr_for_fetch(drcontext);
   if (instr_fetch != NULL) {
     DR_ASSERT(instr_is_app(instr_fetch));
-    is_cti = instr_fetch;
     if (instr_reads_memory(instr_fetch) || instr_writes_memory(instr_fetch)) {
       instrument_instr(drcontext, bb, where, instr_fetch);
     }
@@ -280,9 +317,9 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
   if (instr_operands == NULL) return DR_EMIT_DEFAULT;
   DR_ASSERT(instr_is_app(instr_operands));
 
-  if (is_cti) {
+  if (instr_is_cti(instr_operands)) {
     const opnd_t target = instr_get_target(instr_operands);
-    if (opnd_is_memory_reference(target)) {
+    if (opnd_is_memory_reference(target) || opnd_is_pc(target) || opnd_is_immed(target)) {
       instrument_control_transfer_instr(drcontext, bb, where, target);
     }
   }
@@ -439,11 +476,11 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
                                DRSYM_DEFAULT_FLAGS);
   DR_ASSERT(status == DRSYM_SUCCESS);
 
-  the_begin_instrumentation_address = reinterpret_cast<uintptr_t>(begin_instrumentation_address);
-  the_end_instrumentation_address = reinterpret_cast<uintptr_t>(end_instrumentation_address);
+  the_begin_instrumentation_address = reinterpret_cast<uintptr_t>(begin_instrumentation_address + main_module->start);
+  the_end_instrumentation_address = reinterpret_cast<uintptr_t>(end_instrumentation_address + main_module->start);
 
-  //printf("BeginInstrumentation: %p\n", reinterpret_cast<void*>(begin_instrumentation_address));
-  //printf("EndInstrumentation: %p\n", reinterpret_cast<void*>(end_instrumentation_address));
+  printf("BeginInstrumentation: %p\n", reinterpret_cast<void*>(the_begin_instrumentation_address));
+  printf("EndInstrumentation: %p\n", reinterpret_cast<void*>(the_end_instrumentation_address));
 
   dr_free_module_data(main_module);
 
