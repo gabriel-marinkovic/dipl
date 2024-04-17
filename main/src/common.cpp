@@ -442,7 +442,6 @@ file_t OpenUniqueFile(void* drcontext, client_id_t id, String nameBase, String e
 
   uint64_t flags = DR_FILE_ALLOW_LARGE;
   if (read) flags |= DR_FILE_READ;
-  if (write) flags |= DR_FILE_WRITE_OVERWRITE;
 
   file_t file = drx_open_unique_appid_file(reinterpret_cast<char*>(dir.address), dr_get_process_id(),
                                            reinterpret_cast<char*>(nameBase.address),

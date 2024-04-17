@@ -4,6 +4,7 @@ use_DynamoRIO_extension(client drmgr)
 use_DynamoRIO_extension(client drreg)
 use_DynamoRIO_extension(client drutil)
 use_DynamoRIO_extension(client drx)
+use_DynamoRIO_extension(client drsyms)
 
 install(
 	TARGETS

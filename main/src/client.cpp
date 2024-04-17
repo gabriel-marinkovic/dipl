@@ -39,6 +39,7 @@
 #include "dr_api.h"
 #include "drmgr.h"
 #include "drreg.h"
+#include "drsyms.h"
 #include "drutil.h"
 #include "drx.h"
 
@@ -64,8 +65,6 @@ struct MemoryReference {
 /* The maximum size of buffer for holding mem_refs. */
 #define MEM_BUF_SIZE (sizeof(MemoryReference) * MAX_NUM_MEM_REFS)
 
-/* thread private log file and counter */
-
 struct ThreadData {
   uint8_t* seg_base;
   MemoryReference* buf_base;
@@ -80,10 +79,13 @@ static uint64_t the_total_memory_reference_count;
 static void* the_module_mutex;
 static BufferedFileWriter the_module_writer;
 
+uintptr_t the_begin_instrumentation_address;
+uintptr_t the_end_instrumentation_address;
 
 /* Allocated TLS slot offsets */
 enum TlsOffset {
   TLS_OFFSET_BUF_PTR,
+  TLS_OFFSET_IS_INSTRUMENTING,
   TLS_OFFSET__COUNT,
 };
 static reg_id_t tls_seg;
@@ -91,6 +93,7 @@ static uint32_t tls_offs;
 static int the_tls_idx;
 #define TLS_SLOT(tls_base, enum_val) (void**)((uint8_t*)(tls_base) + tls_offs + (enum_val))
 #define BUF_PTR(tls_base) *(MemoryReference**)TLS_SLOT(tls_base, TLS_OFFSET_BUF_PTR)
+#define IS_INSTRUMENTING(tls_base) *(uintptr_t*)TLS_SLOT(tls_base, TLS_OFFSET_IS_INSTRUMENTING)
 
 static void memtrace(void* drcontext) {
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
@@ -122,6 +125,10 @@ static void insert_update_buf_ptr(void* drcontext, instrlist_t* ilist, instr_t* 
   instrlist_meta_preinsert(ilist, where,
                            XINST_CREATE_add(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT16(adjust)));
   dr_insert_write_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_BUF_PTR, reg_ptr);
+}
+
+static void insert_load_is_instrumenting(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t reg_ptr) {
+  dr_insert_read_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_IS_INSTRUMENTING, reg_ptr);
 }
 
 static void insert_save_type(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t base, reg_id_t scratch,
@@ -163,6 +170,33 @@ static void insert_save_addr(void* drcontext, instrlist_t* ilist, instr_t* where
   instrlist_meta_preinsert(ilist, where,
                            XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(reg_ptr, offsetof(MemoryReference, addr)),
                                               opnd_create_reg(reg_addr)));
+}
+
+static void insert_check_if_special_control_transfer_target(void* drcontext, instrlist_t* ilist, instr_t* where,
+                                                            opnd_t ref, reg_id_t reg_ptr, reg_id_t reg_addr) {
+  // We use reg_ptr as scratch to get addr.
+  bool ok = drutil_insert_get_mem_addr(drcontext, ilist, where, ref, reg_addr, reg_ptr);
+  DR_ASSERT(ok);
+
+  instr_t* label_do_the_thing = INSTR_CREATE_label(drcontext);
+  instr_t* label_skip = INSTR_CREATE_label(drcontext);
+
+  instrlist_meta_preinsert(ilist, where,
+                           XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_addr),
+                                            opnd_create_immed_uint(the_begin_instrumentation_address,
+                                                                   sizeof(the_begin_instrumentation_address))));
+
+  instrlist_meta_preinsert(ilist, where,
+                           XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(label_do_the_thing)));
+  instrlist_meta_preinsert(ilist, where, XINST_CREATE_jump(drcontext, opnd_create_instr(label_skip)));
+
+  instrlist_meta_preinsert(ilist, where, label_do_the_thing);
+
+  insert_load_is_instrumenting(drcontext, ilist, where, reg_ptr);
+
+  instrlist_meta_preinsert(ilist, where, INSTR_CREATE_inc(drcontext, OPND_CREATE_MEMPTR(reg_ptr, 0)));
+
+  instrlist_meta_preinsert(ilist, where, label_skip);
 }
 
 /* insert inline code to add an instruction entry into the buffer */
@@ -208,6 +242,8 @@ static void instrument_mem(void* drcontext, instrlist_t* ilist, instr_t* where, 
     DR_ASSERT(false);
 }
 
+static void instrument_control_transfer_instr(void* drcontext, instrlist_t* ilist, instr_t* where, opnd_t target) {}
+
 /* For each memory reference app instr, we insert inline code to fill the buffer
  * with an instruction entry and memory reference entries.
  */
@@ -218,45 +254,56 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
    * of drutil_expand_rep_string() and drx_expand_scatter_gather() (as well
    * as another client/library emulating the instruction stream).
    */
+  bool is_cti = false;
   instr_t* instr_fetch = drmgr_orig_app_instr_for_fetch(drcontext);
-  if (instr_fetch != NULL && (instr_reads_memory(instr_fetch) || instr_writes_memory(instr_fetch))) {
+  if (instr_fetch != NULL) {
     DR_ASSERT(instr_is_app(instr_fetch));
-    instrument_instr(drcontext, bb, where, instr_fetch);
+    is_cti = instr_fetch;
+    if (instr_reads_memory(instr_fetch) || instr_writes_memory(instr_fetch)) {
+      instrument_instr(drcontext, bb, where, instr_fetch);
+    }
   }
 
   /* Insert code to add an entry for each memory reference opnd. */
   instr_t* instr_operands = drmgr_orig_app_instr_for_operands(drcontext);
-  if (instr_operands == NULL || (!instr_reads_memory(instr_operands) && !instr_writes_memory(instr_operands)))
-    return DR_EMIT_DEFAULT;
+  if (instr_operands == NULL) return DR_EMIT_DEFAULT;
   DR_ASSERT(instr_is_app(instr_operands));
 
-  for (int i = 0; i < instr_num_srcs(instr_operands); i++) {
-    const opnd_t src = instr_get_src(instr_operands, i);
-    if (opnd_is_memory_reference(src)) {
-      instrument_mem(drcontext, bb, where, src, false);
+  if (is_cti) {
+    const opnd_t target = instr_get_target(instr_operands);
+    if (opnd_is_memory_reference(target)) {
     }
   }
 
-  for (int i = 0; i < instr_num_dsts(instr_operands); i++) {
-    const opnd_t dst = instr_get_dst(instr_operands, i);
-    if (opnd_is_memory_reference(dst)) {
-      instrument_mem(drcontext, bb, where, dst, true);
+  if (instr_reads_memory(instr_operands) || instr_writes_memory(instr_operands)) {
+    for (int i = 0; i < instr_num_srcs(instr_operands); i++) {
+      const opnd_t src = instr_get_src(instr_operands, i);
+      if (opnd_is_memory_reference(src)) {
+        instrument_mem(drcontext, bb, where, src, false);
+      }
     }
-  }
 
-  /* insert code to call clean_call for processing the buffer */
-  if (/* XXX i#1698: there are constraints for code between ldrex/strex pairs,
-       * so we minimize the instrumentation in between by skipping the clean call.
-       * As we're only inserting instrumentation on a memory reference, and the
-       * app should be avoiding memory accesses in between the ldrex...strex,
-       * the only problematic point should be before the strex.
-       * However, there is still a chance that the instrumentation code may clear the
-       * exclusive monitor state.
-       * Using a fault to handle a full buffer should be more robust, and the
-       * forthcoming buffer filling API (i#513) will provide that.
-       */
-      IF_AARCHXX_ELSE(!instr_is_exclusive_store(instr_operands), true))
-    dr_insert_clean_call(drcontext, bb, where, (void*)clean_call, false, 0);
+    for (int i = 0; i < instr_num_dsts(instr_operands); i++) {
+      const opnd_t dst = instr_get_dst(instr_operands, i);
+      if (opnd_is_memory_reference(dst)) {
+        instrument_mem(drcontext, bb, where, dst, true);
+      }
+    }
+
+    /* insert code to call clean_call for processing the buffer */
+    if (/* XXX i#1698: there are constraints for code between ldrex/strex pairs,
+         * so we minimize the instrumentation in between by skipping the clean call.
+         * As we're only inserting instrumentation on a memory reference, and the
+         * app should be avoiding memory accesses in between the ldrex...strex,
+         * the only problematic point should be before the strex.
+         * However, there is still a chance that the instrumentation code may clear the
+         * exclusive monitor state.
+         * Using a fault to handle a full buffer should be more robust, and the
+         * forthcoming buffer filling API (i#513) will provide that.
+         */
+        IF_AARCHXX_ELSE(!instr_is_exclusive_store(instr_operands), true))
+      dr_insert_clean_call(drcontext, bb, where, (void*)clean_call, false, 0);
+  }
 
   return DR_EMIT_DEFAULT;
 }
@@ -288,6 +335,7 @@ static void event_thread_init(void* drcontext) {
   DR_ASSERT(data->seg_base != NULL && data->buf_base != NULL);
   /* put buf_base to TLS as starting buf_ptr */
   BUF_PTR(data->seg_base) = data->buf_base;
+  IS_INSTRUMENTING(data->seg_base) = 0;
 
   data->num_refs = 0;
 
@@ -313,8 +361,11 @@ static void event_thread_exit(void* drcontext) {
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   dr_mutex_lock(the_mutex);
   the_total_memory_reference_count += data->num_refs;
+  uint64_t count = reinterpret_cast<uint64_t>(IS_INSTRUMENTING(data->seg_base));
+  //printf("FUNCTION CALL COUNT: %lu\n", count);
   dr_mutex_unlock(the_mutex);
   data->writer.FlushAndDestroy();
+
   dr_raw_mem_free(data->buf_base, MEM_BUF_SIZE);
   dr_thread_free(drcontext, data, sizeof(ThreadData));
 }
@@ -335,6 +386,7 @@ static void event_exit(void) {
   drutil_exit();
   drmgr_exit();
   drx_exit();
+  drsym_exit();
 }
 
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
@@ -342,7 +394,9 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   drreg_options_t ops = {sizeof(ops), 3, false};
   dr_set_client_name("DynamoRIO Sample Client 'memtrace'", "http://dynamorio.org/issues");
 
-  if (!drmgr_init() || drreg_init(&ops) != DRREG_SUCCESS || !drutil_init() || !drx_init()) DR_ASSERT(false);
+  if (!drmgr_init() || drreg_init(&ops) != DRREG_SUCCESS || !drutil_init() || !drx_init() ||
+      drsym_init(0) != DRSYM_SUCCESS)
+    DR_ASSERT(false);
 
   dr_register_exit_event(event_exit);
   if (!drmgr_register_thread_init_event(event_thread_init) || !drmgr_register_thread_exit_event(event_thread_exit) ||
@@ -355,10 +409,29 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   the_mutex = dr_mutex_create();
   the_module_mutex = dr_mutex_create();
 
-
   file_t module_file = OpenUniqueFile(nullptr, the_client_id, Wrap("module"), Wrap("module"), false, true);
   BufferedFileWriter::Make(&the_module_writer, nullptr, module_file, 1024);
 
+  module_data_t* main_module = dr_get_main_module();
+  DR_ASSERT(main_module);
+
+  size_t begin_instrumentation_address = 0;
+  size_t end_instrumentation_address = 0;
+  drsym_error_t status;
+  status = drsym_lookup_symbol(main_module->full_path, "BeginInstrumentation", &begin_instrumentation_address,
+                               DRSYM_DEFAULT_FLAGS);
+  DR_ASSERT(status == DRSYM_SUCCESS);
+  status = drsym_lookup_symbol(main_module->full_path, "EndInstrumentation", &end_instrumentation_address,
+                               DRSYM_DEFAULT_FLAGS);
+  DR_ASSERT(status == DRSYM_SUCCESS);
+
+  the_begin_instrumentation_address = reinterpret_cast<uintptr_t>(begin_instrumentation_address);
+  the_end_instrumentation_address = reinterpret_cast<uintptr_t>(end_instrumentation_address);
+
+  //printf("BeginInstrumentation: %p\n", reinterpret_cast<void*>(begin_instrumentation_address));
+  //printf("EndInstrumentation: %p\n", reinterpret_cast<void*>(end_instrumentation_address));
+
+  dr_free_module_data(main_module);
 
   the_tls_idx = drmgr_register_tls_field();
   DR_ASSERT(the_tls_idx != -1);
