@@ -5,7 +5,7 @@ set(CMAKE_C_COMPILER clang)
 set(CMAKE_CXX_COMPILER clang++)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-add_compile_options(-g -ggdb)
+add_compile_options(-g -ggdb -pthread)
 
 find_package(DynamoRIO)
 if (NOT DynamoRIO_FOUND)

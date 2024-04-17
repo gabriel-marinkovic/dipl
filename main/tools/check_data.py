@@ -6,12 +6,16 @@ import dataclasses
 from typing import Dict, FrozenSet, List, Set, Tuple
 
 
-def run_command(command_name, *args):
+def run_command(command_name, *args, silent=False):
     command = [command_name] + list(args)
+    if not silent:
+        print("CMD:", " ".join(command))
     result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    print(result.stdout, end="")
-    if result.stderr:
-        print("Error:", result.stderr, end="")
+    if not silent:
+        print(result.stdout, end="")
+        if result.stderr:
+            print("Error:", result.stderr, end="")
+    return result.stdout, result.stderr
 
 
 def fa(addr):
@@ -210,8 +214,23 @@ print("----------------------------------------")
 
 for module in modules:
     print(module.preferred_name, module.base)
+print("----------------------------------------")
 
-to_resolve = []
+
+@dataclasses.dataclass(frozen=True)
+class InstructionToInstrument:
+    module: Module
+    name: str
+    offset: int
+    addr2line_output: str
+
+    def runtime_address(self) -> int:
+        return self.module.base + self.offset
+    def preferred_address(self) -> int:
+        return self.module.preferred_base + self.offset
+
+
+instrumented = []
 for addr, name in sorted(truly_shared_instruction_addresses):
     min_addr = float("inf")
     min_idx = -1
@@ -225,11 +244,23 @@ for addr, name in sorted(truly_shared_instruction_addresses):
 
     module = modules[min_idx]
     offset = addr - module.base
-    to_resolve.append((name, module, offset))
-    print("{: <48}{: <12}0x{:x}".format(module.path, name, offset))
+    preferred_address = module.preferred_base + offset
+
+    out, err = run_command("addr2line", "-Cafipe", module.path, f"0x{preferred_address:x}", silent=True)
+    addr2line = (out + err).strip()
+    instrumented.append(InstructionToInstrument(module=module, name=name, offset=offset, addr2line_output=addr2line))
+
+    print("{: <64}{: <12}0x{:x}".format(module.preferred_name, name, offset))
 
 print("----------------------------------------")
-for instr_name, module, offset in to_resolve:
-    offset += module.preferred_base
-    run_command("addr2line", "-Ciape", module.path, f"0x{offset:x}")
-    print("")
+
+instrumented_trimmed = []
+for instr in instrumented:
+    if ": ?? ??:0" in instr.addr2line_output:
+        continue
+    if "/malloc/" in instr.addr2line_output:
+        continue
+    if ": _dl_" in instr.addr2line_output:
+        continue
+    instrumented_trimmed.append(instr)
+print(len(instrumented_trimmed))
