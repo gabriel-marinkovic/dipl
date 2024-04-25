@@ -132,9 +132,11 @@ static void insert_load_is_instrumenting(void* drcontext, instrlist_t* ilist, in
                          reg_ptr);
 }
 
-static void insert_update_is_instrumenting(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t reg_ptr) {
+static void insert_set_is_instrumenting(void* drcontext, instrlist_t* ilist, instr_t* where, uint32_t value,
+                                        reg_id_t scratch) {
+  instrlist_insert_mov_immed_ptrsz(drcontext, value, opnd_create_reg(scratch), ilist, where, NULL, NULL);
   dr_insert_write_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_IS_INSTRUMENTING * sizeof(void*),
-                          reg_ptr);
+                          scratch);
 }
 
 static void insert_save_type(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t base, reg_id_t scratch,
@@ -178,58 +180,61 @@ static void insert_save_addr(void* drcontext, instrlist_t* ilist, instr_t* where
                                               opnd_create_reg(reg_addr)));
 }
 
+static void insert_cmp_with_ptr(void* drcontext, instrlist_t* ilist, instr_t* where, uintptr_t value, reg_id_t reg,
+                                reg_id_t scratch) {
+  // Load `the_begin_instrumentation_address` into `reg_ptr` (which we are currently using as a scratch register).
+  // instrlist_insert_mov_immed_ptrsz(drcontext, value, opnd_create_reg(scratch), ilist, where, NULL, NULL);
+  instrlist_meta_preinsert(ilist, where, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg),
+  opnd_create_reg(scratch)));
+}
+
 static void insert_check_if_special_control_transfer_target(void* drcontext, instrlist_t* ilist, instr_t* where,
                                                             opnd_t target, reg_id_t reg_ptr, reg_id_t reg_addr) {
   if (opnd_is_memory_reference(target)) {
-      // We use reg_ptr as scratch to get addr.
+    // We use reg_ptr as scratch to get addr.
     bool ok = drutil_insert_get_mem_addr(drcontext, ilist, where, target, reg_addr, reg_ptr);
     DR_ASSERT(ok);
 
-    instr_t* label_do_the_thing = INSTR_CREATE_label(drcontext);
+    instr_t* label_begin_instrumentation = INSTR_CREATE_label(drcontext);
+    instr_t* label_end_instrumentation = INSTR_CREATE_label(drcontext);
     instr_t* label_skip = INSTR_CREATE_label(drcontext);
 
-    // test, store/restore state
-    uint32_t test = (uint32_t)the_begin_instrumentation_address;
-    instrlist_meta_preinsert(ilist, where,
-                             XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_addr), OPND_CREATE_INT32(test)));
-    instrlist_meta_preinsert(ilist, where,
-                             XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(label_do_the_thing)));
+    // Load `the_begin_instrumentation_address` into `reg_ptr` (which we are currently using as a scratch register).
+    insert_cmp_with_ptr(drcontext, ilist, where, the_begin_instrumentation_address, reg_addr, reg_ptr);
+    instrlist_meta_preinsert(
+        ilist, where, XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(label_begin_instrumentation)));
+
+    insert_cmp_with_ptr(drcontext, ilist, where, the_end_instrumentation_address, reg_addr, reg_ptr);
+    instrlist_meta_preinsert(
+        ilist, where, XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(label_end_instrumentation)));
+
     instrlist_meta_preinsert(ilist, where, XINST_CREATE_jump(drcontext, opnd_create_instr(label_skip)));
-    instrlist_meta_preinsert(ilist, where, label_do_the_thing);
-    insert_load_is_instrumenting(drcontext, ilist, where, reg_ptr);
-    instrlist_meta_preinsert(ilist, where, XINST_CREATE_add(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(1)));
-    insert_update_is_instrumenting(drcontext, ilist, where, reg_ptr);
+
+    instrlist_meta_preinsert(ilist, where, label_begin_instrumentation);
+    insert_set_is_instrumenting(drcontext, ilist, where, 1, reg_ptr);
+    instrlist_meta_preinsert(ilist, where, XINST_CREATE_jump(drcontext, opnd_create_instr(label_skip)));
+
+    instrlist_meta_preinsert(ilist, where, label_end_instrumentation);
+    insert_set_is_instrumenting(drcontext, ilist, where, 0, reg_ptr);
+
     instrlist_meta_preinsert(ilist, where, label_skip);
   } else if (opnd_is_pc(target)) {
     uintptr_t address = reinterpret_cast<uintptr_t>(opnd_get_pc(target));
-    if (address == the_begin_instrumentation_address || address == the_end_instrumentation_address) {
-      IS_INSTRUMENTING(dr_get_dr_segment_base(tls_seg)) += 1;
-      printf("tls_seg: %d\n", tls_seg);
+    if (address == the_begin_instrumentation_address) {
+      insert_set_is_instrumenting(drcontext, ilist, where, 1, reg_ptr);
+    } else if (address == the_end_instrumentation_address) {
+      insert_set_is_instrumenting(drcontext, ilist, where, 0, reg_ptr);
     }
   } else if (opnd_is_immed(target)) {
     uint64_t address = opnd_get_immed_int64(target);
-    if (address == the_begin_instrumentation_address || address == the_end_instrumentation_address) {
-      IS_INSTRUMENTING(dr_get_dr_segment_base(tls_seg)) += 1;
+    if (address == the_begin_instrumentation_address) {
+      insert_set_is_instrumenting(drcontext, ilist, where, 1, reg_ptr);
+    } else if (address == the_end_instrumentation_address) {
+      insert_set_is_instrumenting(drcontext, ilist, where, 0, reg_ptr);
     }
   } else {
     DR_ASSERT(false);
   }
-
-  instr_t* label_do_the_thing = INSTR_CREATE_label(drcontext);
-  instr_t* label_skip = INSTR_CREATE_label(drcontext);
-
-  // test, store/restore state
-  uint32_t test = (uint32_t)the_begin_instrumentation_address;
-  instrlist_meta_preinsert(ilist, where,
-                           XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_addr), OPND_CREATE_INT32(test)));
-  instrlist_meta_preinsert(ilist, where,
-                           XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(label_do_the_thing)));
-  instrlist_meta_preinsert(ilist, where, XINST_CREATE_jump(drcontext, opnd_create_instr(label_skip)));
-  instrlist_meta_preinsert(ilist, where, label_do_the_thing);
-  insert_load_is_instrumenting(drcontext, ilist, where, reg_ptr);
-  instrlist_meta_preinsert(ilist, where, XINST_CREATE_add(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(1)));
-  insert_update_is_instrumenting(drcontext, ilist, where, reg_ptr);
-  instrlist_meta_preinsert(ilist, where, label_skip);
 }
 
 /* insert inline code to add an instruction entry into the buffer */
