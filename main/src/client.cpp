@@ -183,13 +183,88 @@ static void insert_save_addr(void* drcontext, instrlist_t* ilist, instr_t* where
 static void insert_cmp_with_ptr(void* drcontext, instrlist_t* ilist, instr_t* where, uintptr_t value, reg_id_t reg,
                                 reg_id_t scratch) {
   // Load `the_begin_instrumentation_address` into `reg_ptr` (which we are currently using as a scratch register).
-  // instrlist_insert_mov_immed_ptrsz(drcontext, value, opnd_create_reg(scratch), ilist, where, NULL, NULL);
-  instrlist_meta_preinsert(ilist, where, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg),
-  opnd_create_reg(scratch)));
+  instrlist_insert_mov_immed_ptrsz(drcontext, value, opnd_create_reg(scratch), ilist, where, NULL, NULL);
+  instrlist_meta_preinsert(ilist, where, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg), opnd_create_reg(scratch)));
 }
 
-static void insert_check_if_special_control_transfer_target(void* drcontext, instrlist_t* ilist, instr_t* where,
-                                                            opnd_t target, reg_id_t reg_ptr, reg_id_t reg_addr) {
+static void insert_skip_if_not_instrumenting(void* drcontext, instrlist_t* ilist, instr_t* where, instr_t* label,
+                                             reg_id_t scratch) {
+  insert_load_is_instrumenting(drcontext, ilist, where, scratch);
+  instrlist_meta_preinsert(ilist, where, XINST_CREATE_cmp(drcontext, opnd_create_reg(scratch), OPND_CREATE_INT8(0)));
+  instrlist_meta_preinsert(ilist, where, XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(label)));
+}
+
+/* insert inline code to add an instruction entry into the buffer */
+static void instrument_instr(void* drcontext, instrlist_t* ilist, instr_t* where, instr_t* instr) {
+  /* We need two scratch registers */
+  reg_id_t reg_ptr, reg_tmp;
+  /* we don't want to predicate this, because an instruction fetch always occurs */
+  instrlist_set_auto_predicate(ilist, DR_PRED_NONE);
+  if (drreg_reserve_register(drcontext, ilist, where, NULL, &reg_ptr) != DRREG_SUCCESS ||
+      drreg_reserve_register(drcontext, ilist, where, NULL, &reg_tmp) != DRREG_SUCCESS ||
+      drreg_reserve_aflags(drcontext, ilist, where) != DRREG_SUCCESS) {
+    DR_ASSERT(false);
+    return;
+  }
+
+  instr_t* label_skip = INSTR_CREATE_label(drcontext);
+  insert_skip_if_not_instrumenting(drcontext, ilist, where, label_skip, reg_tmp);
+
+  insert_load_buf_ptr(drcontext, ilist, where, reg_ptr);
+  insert_save_type(drcontext, ilist, where, reg_ptr, reg_tmp, (ushort)instr_get_opcode(instr));
+  insert_save_size(drcontext, ilist, where, reg_ptr, reg_tmp, (ushort)instr_length(drcontext, instr));
+  insert_save_pc(drcontext, ilist, where, reg_ptr, reg_tmp, instr_get_app_pc(instr));
+  insert_update_buf_ptr(drcontext, ilist, where, reg_ptr, sizeof(MemoryReference));
+
+  instrlist_meta_preinsert(ilist, where, label_skip);
+
+  /* Restore scratch registers */
+  if (drreg_unreserve_register(drcontext, ilist, where, reg_ptr) != DRREG_SUCCESS ||
+      drreg_unreserve_register(drcontext, ilist, where, reg_tmp) != DRREG_SUCCESS ||
+      drreg_unreserve_aflags(drcontext, ilist, where) != DRREG_SUCCESS)
+    DR_ASSERT(false);
+  instrlist_set_auto_predicate(ilist, instr_get_predicate(where));
+}
+
+/* insert inline code to add a memory reference info entry into the buffer */
+static void instrument_mem(void* drcontext, instrlist_t* ilist, instr_t* where, opnd_t ref, bool write) {
+  /* We need two scratch registers */
+  reg_id_t reg_ptr, reg_tmp;
+  if (drreg_reserve_register(drcontext, ilist, where, NULL, &reg_ptr) != DRREG_SUCCESS ||
+      drreg_reserve_register(drcontext, ilist, where, NULL, &reg_tmp) != DRREG_SUCCESS ||
+      drreg_reserve_aflags(drcontext, ilist, where) != DRREG_SUCCESS) {
+    DR_ASSERT(false);
+    return;
+  }
+
+  instr_t* label_skip = INSTR_CREATE_label(drcontext);
+  insert_skip_if_not_instrumenting(drcontext, ilist, where, label_skip, reg_tmp);
+
+  /* save_addr should be called first as reg_ptr or reg_tmp maybe used in ref */
+  insert_save_addr(drcontext, ilist, where, ref, reg_ptr, reg_tmp);
+  insert_save_type(drcontext, ilist, where, reg_ptr, reg_tmp, write ? REF_KIND_WRITE : REF_KIND_READ);
+  insert_save_size(drcontext, ilist, where, reg_ptr, reg_tmp, (ushort)drutil_opnd_mem_size_in_bytes(ref, where));
+  insert_update_buf_ptr(drcontext, ilist, where, reg_ptr, sizeof(MemoryReference));
+
+  instrlist_meta_preinsert(ilist, where, label_skip);
+
+  /* Restore scratch registers */
+  if (drreg_unreserve_register(drcontext, ilist, where, reg_ptr) != DRREG_SUCCESS ||
+      drreg_unreserve_register(drcontext, ilist, where, reg_tmp) != DRREG_SUCCESS ||
+      drreg_unreserve_aflags(drcontext, ilist, where) != DRREG_SUCCESS)
+    DR_ASSERT(false);
+}
+
+static void instrument_control_transfer_instr(void* drcontext, instrlist_t* ilist, instr_t* where, opnd_t target) {
+  /* We need two scratch registers */
+  reg_id_t reg_ptr, reg_addr;
+  if (drreg_reserve_register(drcontext, ilist, where, NULL, &reg_ptr) != DRREG_SUCCESS ||
+      drreg_reserve_register(drcontext, ilist, where, NULL, &reg_addr) != DRREG_SUCCESS ||
+      drreg_reserve_aflags(drcontext, ilist, where) != DRREG_SUCCESS) {
+    DR_ASSERT(false);
+    return;
+  }
+
   if (opnd_is_memory_reference(target)) {
     // We use reg_ptr as scratch to get addr.
     bool ok = drutil_insert_get_mem_addr(drcontext, ilist, where, target, reg_addr, reg_ptr);
@@ -235,66 +310,10 @@ static void insert_check_if_special_control_transfer_target(void* drcontext, ins
   } else {
     DR_ASSERT(false);
   }
-}
-
-/* insert inline code to add an instruction entry into the buffer */
-static void instrument_instr(void* drcontext, instrlist_t* ilist, instr_t* where, instr_t* instr) {
-  /* We need two scratch registers */
-  reg_id_t reg_ptr, reg_tmp;
-  /* we don't want to predicate this, because an instruction fetch always occurs */
-  instrlist_set_auto_predicate(ilist, DR_PRED_NONE);
-  if (drreg_reserve_register(drcontext, ilist, where, NULL, &reg_ptr) != DRREG_SUCCESS ||
-      drreg_reserve_register(drcontext, ilist, where, NULL, &reg_tmp) != DRREG_SUCCESS) {
-    DR_ASSERT(false);
-    return;
-  }
-  insert_load_buf_ptr(drcontext, ilist, where, reg_ptr);
-  insert_save_type(drcontext, ilist, where, reg_ptr, reg_tmp, (ushort)instr_get_opcode(instr));
-  insert_save_size(drcontext, ilist, where, reg_ptr, reg_tmp, (ushort)instr_length(drcontext, instr));
-  insert_save_pc(drcontext, ilist, where, reg_ptr, reg_tmp, instr_get_app_pc(instr));
-  insert_update_buf_ptr(drcontext, ilist, where, reg_ptr, sizeof(MemoryReference));
-  /* Restore scratch registers */
-  if (drreg_unreserve_register(drcontext, ilist, where, reg_ptr) != DRREG_SUCCESS ||
-      drreg_unreserve_register(drcontext, ilist, where, reg_tmp) != DRREG_SUCCESS)
-    DR_ASSERT(false);
-  instrlist_set_auto_predicate(ilist, instr_get_predicate(where));
-}
-
-/* insert inline code to add a memory reference info entry into the buffer */
-static void instrument_mem(void* drcontext, instrlist_t* ilist, instr_t* where, opnd_t ref, bool write) {
-  /* We need two scratch registers */
-  reg_id_t reg_ptr, reg_tmp;
-  if (drreg_reserve_register(drcontext, ilist, where, NULL, &reg_ptr) != DRREG_SUCCESS ||
-      drreg_reserve_register(drcontext, ilist, where, NULL, &reg_tmp) != DRREG_SUCCESS) {
-    DR_ASSERT(false);
-    return;
-  }
-  /* save_addr should be called first as reg_ptr or reg_tmp maybe used in ref */
-  insert_save_addr(drcontext, ilist, where, ref, reg_ptr, reg_tmp);
-  insert_save_type(drcontext, ilist, where, reg_ptr, reg_tmp, write ? REF_KIND_WRITE : REF_KIND_READ);
-  insert_save_size(drcontext, ilist, where, reg_ptr, reg_tmp, (ushort)drutil_opnd_mem_size_in_bytes(ref, where));
-  insert_update_buf_ptr(drcontext, ilist, where, reg_ptr, sizeof(MemoryReference));
-  /* Restore scratch registers */
-  if (drreg_unreserve_register(drcontext, ilist, where, reg_ptr) != DRREG_SUCCESS ||
-      drreg_unreserve_register(drcontext, ilist, where, reg_tmp) != DRREG_SUCCESS)
-    DR_ASSERT(false);
-}
-
-static void instrument_control_transfer_instr(void* drcontext, instrlist_t* ilist, instr_t* where, opnd_t target) {
-  /* We need two scratch registers */
-  reg_id_t reg_ptr, reg_tmp;
-  if (drreg_reserve_register(drcontext, ilist, where, NULL, &reg_ptr) != DRREG_SUCCESS ||
-      drreg_reserve_register(drcontext, ilist, where, NULL, &reg_tmp) != DRREG_SUCCESS ||
-      drreg_reserve_aflags(drcontext, ilist, where) != DRREG_SUCCESS) {
-    DR_ASSERT(false);
-    return;
-  }
-
-  insert_check_if_special_control_transfer_target(drcontext, ilist, where, target, reg_ptr, reg_tmp);
 
   /* Restore scratch registers */
   if (drreg_unreserve_register(drcontext, ilist, where, reg_ptr) != DRREG_SUCCESS ||
-      drreg_unreserve_register(drcontext, ilist, where, reg_tmp) != DRREG_SUCCESS ||
+      drreg_unreserve_register(drcontext, ilist, where, reg_addr) != DRREG_SUCCESS ||
       drreg_unreserve_aflags(drcontext, ilist, where) != DRREG_SUCCESS)
     DR_ASSERT(false);
 }
@@ -309,17 +328,25 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
    * of drutil_expand_rep_string() and drx_expand_scatter_gather() (as well
    * as another client/library emulating the instruction stream).
    */
-  instr_t* instr_fetch = drmgr_orig_app_instr_for_fetch(drcontext);
-  if (instr_fetch != NULL) {
+
+  // If it happens that we can call `instrument_control_transfer_instr` for this instruction, `instrument_instr` must be
+  // called after it. Wrap `instrument_control_transfer_instr` and either call it `instrument_control_transfer_instr`,
+  // or immediately if ``instrument_control_transfer_instr` can't be called here.
+  auto maybe_instrument_instr = [&]() {
+    instr_t* instr_fetch = drmgr_orig_app_instr_for_fetch(drcontext);
+    if (!instr_fetch) return;
     DR_ASSERT(instr_is_app(instr_fetch));
     if (instr_reads_memory(instr_fetch) || instr_writes_memory(instr_fetch)) {
       instrument_instr(drcontext, bb, where, instr_fetch);
     }
-  }
+  };
 
   /* Insert code to add an entry for each memory reference opnd. */
   instr_t* instr_operands = drmgr_orig_app_instr_for_operands(drcontext);
-  if (instr_operands == NULL) return DR_EMIT_DEFAULT;
+  if (instr_operands == NULL) {
+    maybe_instrument_instr();
+    return DR_EMIT_DEFAULT;
+  }
   DR_ASSERT(instr_is_app(instr_operands));
 
   if (instr_is_cti(instr_operands)) {
@@ -328,6 +355,8 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
       instrument_control_transfer_instr(drcontext, bb, where, target);
     }
   }
+
+  maybe_instrument_instr();
 
   if (instr_reads_memory(instr_operands) || instr_writes_memory(instr_operands)) {
     for (int i = 0; i < instr_num_srcs(instr_operands); i++) {
@@ -416,7 +445,7 @@ static void event_thread_exit(void* drcontext) {
   dr_mutex_lock(the_mutex);
   the_total_memory_reference_count += data->num_refs;
   uint64_t count = reinterpret_cast<uint64_t>(IS_INSTRUMENTING(data->seg_base));
-  printf("FUNCTION CALL COUNT: %lu\n", count);
+  // printf("FUNCTION CALL COUNT: %lu\n", count);
   dr_mutex_unlock(the_mutex);
   data->writer.FlushAndDestroy();
 
@@ -442,7 +471,7 @@ static void event_exit(void) {
   drx_exit();
   drsym_exit();
 
-  printf("we done\n");
+  // printf("we done\n");
 }
 
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
@@ -484,8 +513,8 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   the_begin_instrumentation_address = reinterpret_cast<uintptr_t>(begin_instrumentation_address + main_module->start);
   the_end_instrumentation_address = reinterpret_cast<uintptr_t>(end_instrumentation_address + main_module->start);
 
-  printf("BeginInstrumentation: %p\n", reinterpret_cast<void*>(the_begin_instrumentation_address));
-  printf("EndInstrumentation: %p\n", reinterpret_cast<void*>(the_end_instrumentation_address));
+  // printf("BeginInstrumentation: %p\n", reinterpret_cast<void*>(the_begin_instrumentation_address));
+  // printf("EndInstrumentation: %p\n", reinterpret_cast<void*>(the_end_instrumentation_address));
 
   dr_free_module_data(main_module);
 

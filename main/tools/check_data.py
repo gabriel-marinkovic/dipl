@@ -150,12 +150,15 @@ def process_file(
     with open(file_path, "rb") as file:
         instr = None
         while True:
+            print(file.tell())
             record_bytes = file.read(record_size)
             if not record_bytes:
                 break
 
             opcode, size, addr = struct.unpack(record_format, record_bytes)
             opcode_name = read_packed_string(file)
+
+            print(opcode, opcode_name, size, fa(addr))
 
             is_instruction = (opcode != 0 and opcode != 1)
             if is_instruction:
@@ -169,6 +172,7 @@ def process_file(
                     instr.name = "<UNKNOWN>"
             else:
                 assert instr
+
                 assert len(opcode_name) == 0
                 op = Operand(is_read=(opcode == 0), address=addr, size=size)
                 if op.is_read:
@@ -256,11 +260,6 @@ print("----------------------------------------")
 
 instrumented_trimmed = []
 for instr in instrumented:
-    if ": ?? ??:0" in instr.addr2line_output:
-        continue
-    if "/malloc/" in instr.addr2line_output:
-        continue
-    if ": _dl_" in instr.addr2line_output:
-        continue
-    instrumented_trimmed.append(instr)
+    print(instr.addr2line_output)
+
 print(len(instrumented_trimmed))
