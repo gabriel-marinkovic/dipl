@@ -132,7 +132,7 @@ static void insert_load_is_instrumenting(void* drcontext, instrlist_t* ilist, in
                          reg_ptr);
 }
 
-static void insert_set_is_instrumenting(void* drcontext, instrlist_t* ilist, instr_t* where, uint32_t value,
+static void insert_set_is_instrumenting(void* drcontext, instrlist_t* ilist, instr_t* where, uintptr_t value,
                                         reg_id_t scratch) {
   instrlist_insert_mov_immed_ptrsz(drcontext, value, opnd_create_reg(scratch), ilist, where, NULL, NULL);
   dr_insert_write_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_IS_INSTRUMENTING * sizeof(void*),
@@ -182,7 +182,6 @@ static void insert_save_addr(void* drcontext, instrlist_t* ilist, instr_t* where
 
 static void insert_cmp_with_ptr(void* drcontext, instrlist_t* ilist, instr_t* where, uintptr_t value, reg_id_t reg,
                                 reg_id_t scratch) {
-  // Load `the_begin_instrumentation_address` into `reg_ptr` (which we are currently using as a scratch register).
   instrlist_insert_mov_immed_ptrsz(drcontext, value, opnd_create_reg(scratch), ilist, where, NULL, NULL);
   instrlist_meta_preinsert(ilist, where, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg), opnd_create_reg(scratch)));
 }
