@@ -1,25 +1,16 @@
 cmake_minimum_required(VERSION 3.24)
+project(main LANGUAGES CXX)
 
-if (NOT CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
-    set (
-        CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/install"
-        CACHE PATH "default_install_path" FORCE)
+set(CMAKE_C_COMPILER clang)
+set(CMAKE_CXX_COMPILER clang++)
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+add_compile_options(-g -ggdb)
+
+find_package(DynamoRIO)
+if (NOT DynamoRIO_FOUND)
+  message(FATAL_ERROR "DynamoRIO package required to build")
 endif()
-if (NOT DEFINED CMAKE_PREFIX_PATH)
-    set(CMAKE_PREFIX_PATH "${CMAKE_INSTALL_PREFIX}")
-endif()
 
-project(superbuild)
-
-include(ExternalProject)
-
-add_subdirectory(dependencies)
-
-ExternalProject_Add(main
-    PREFIX main
-    URL ${CMAKE_CURRENT_SOURCE_DIR}/main
-    CMAKE_ARGS
-        "-DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}"
-        "-DCMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}"
-    DEPENDS DynamoRIO
-    BUILD_ALWAYS 1)
+add_subdirectory(src)
+add_subdirectory(example)

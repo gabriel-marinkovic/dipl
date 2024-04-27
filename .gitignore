@@ -33,10 +33,13 @@
 
 # CMake
 build
-install
 
 # Sublime Text
 *.sublime-workspace
 
 # Python
 */__pycache__
+
+#DynamoRIO
+DynamoRIO
+DynamoRIO_src
