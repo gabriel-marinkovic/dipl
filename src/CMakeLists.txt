@@ -6,8 +6,10 @@ use_DynamoRIO_extension(client drutil)
 use_DynamoRIO_extension(client drx)
 use_DynamoRIO_extension(client drsyms)
 
-install(
-	TARGETS
-		client
-	DESTINATION
-		"${CMAKE_INSTALL_PREFIX}/client")
+add_library(runner SHARED runner.cpp common.cpp)
+configure_DynamoRIO_client(runner)
+use_DynamoRIO_extension(runner drmgr)
+use_DynamoRIO_extension(runner drreg)
+use_DynamoRIO_extension(runner drutil)
+use_DynamoRIO_extension(runner drx)
+use_DynamoRIO_extension(runner drsyms)

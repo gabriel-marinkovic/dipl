@@ -254,7 +254,7 @@ for addr, name in sorted(truly_shared_instruction_addresses):
     addr2line = (out + err).strip()
     instrumented.append(InstructionToInstrument(module=module, name=name, offset=offset, addr2line_output=addr2line))
 
-    print("{: <64}{: <12}0x{:x}".format(module.preferred_name, name, offset))
+    print("{: <64}{: <12}0x{:x}".format(module.path, name, offset))
 
 print("----------------------------------------")
 
