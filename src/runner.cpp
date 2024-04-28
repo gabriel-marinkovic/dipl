@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <pthread.h>
 
 #include "dr_api.h"
 #include "drmgr.h"
@@ -31,11 +32,11 @@ struct InstrumentedInstruction {
 };
 
 static InstrumentedInstruction the_instrumented_instructions[] = {
-  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1226, 0, 0},
-  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x122e, 0, 0},
-  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1234, 0, 0},
-  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x123c, 0, 0},
-  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1242, 0, 0},
+  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x130a, 0, 0},
+  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1312, 0, 0},
+  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1318, 0, 0},
+  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1320, 0, 0},
+  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1326, 0, 0},
 };
 
 /* Allocated TLS slot offsets */
@@ -51,10 +52,6 @@ static int the_tls_idx;
 #define BUF_PTR(tls_base) *(MemoryReference**)TLS_SLOT(tls_base, TLS_OFFSET_BUF_PTR)
 #define IS_INSTRUMENTING(tls_base) *(uintptr_t*)TLS_SLOT(tls_base, TLS_OFFSET_IS_INSTRUMENTING)
 
-static void memtrace(void* drcontext) {
-
-}
-
 static void insert_load_is_instrumenting(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t reg_ptr) {
   dr_insert_read_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_IS_INSTRUMENTING * sizeof(void*),
                          reg_ptr);
@@ -67,13 +64,44 @@ static void insert_set_is_instrumenting(void* drcontext, instrlist_t* ilist, ins
                           scratch);
 }
 
+static pthread_mutex_t* mutex;
+static pthread_cond_t* cond;
+static int switch_when_zero = 4;
+static thread_id_t current_thread_id = 0;
+static thread_id_t previous_thread_id = 0;
+static int live_thread_count = 0;
 static void clean_call(uintptr_t instr_addr_relative) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  dr_mutex_lock(the_mutex);
-  printf("Clean call from thread %d, instr %p\n", data->thread_id, reinterpret_cast<void*>(instr_addr_relative));
-  dr_mutex_unlock(the_mutex);
+  pthread_mutex_lock(mutex);
+  printf("Thread %d trying to continue\n", data->thread_id);
+again:;
+  while (true) {
+    if (live_thread_count == 2) break;
+    if (current_thread_id == data->thread_id) break;
+    if (current_thread_id == 0 && previous_thread_id != data->thread_id) break;
+    printf("Thread %d waiting, live_threads: %d, current_thread_id: %d, previous_thread_id: %d\n", data->thread_id, live_thread_count, current_thread_id, previous_thread_id);
+    pthread_cond_wait(cond, mutex);
+    printf("Thread %d awoken.\n", data->thread_id);
+  }
+
+  current_thread_id = data->thread_id;
+
+  bool switch_away = false;
+  if (--switch_when_zero == 0) {
+    printf("Thread %d will no longer schedule itself\n", data->thread_id);
+    previous_thread_id = current_thread_id;
+    current_thread_id = 0;
+    switch_when_zero = 4;
+    switch_away = true;
+    pthread_cond_broadcast(cond);
+    goto again;
+  }
+
+  pthread_mutex_unlock(mutex);
+
+  printf("Thread %d is continuing from instr %p\n", data->thread_id, reinterpret_cast<void*>(instr_addr_relative));
 }
 
 static void instrument_instr(void* drcontext, instrlist_t* ilist, instr_t* where, instr_t* instr) {
@@ -110,6 +138,7 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
     if (!instr.profiled_instruction_absolute) continue;
     if (instr.profiled_instruction_absolute != instr_addr) continue;
 
+    printf("inserting clean call...\n");
     // RECONSIDER: save fp state?
     dr_insert_clean_call(drcontext, bb, where, (void*)clean_call, true, 1, OPND_CREATE_INTPTR(instr.profiled_instruction_relative));
     break;
@@ -144,6 +173,10 @@ static void event_thread_init(void* drcontext) {
   data->seg_base = (uint8_t*)dr_get_dr_segment_base(tls_seg);
   DR_ASSERT(data->seg_base);
   IS_INSTRUMENTING(data->seg_base) = 0;
+
+  pthread_mutex_lock(mutex);
+  ++live_thread_count;
+  pthread_mutex_unlock(mutex);
 }
 
 static void event_module_load(void* drcontext, const module_data_t* info, bool loaded) {
@@ -160,8 +193,18 @@ static void event_module_load(void* drcontext, const module_data_t* info, bool l
 }
 
 static void event_thread_exit(void* drcontext) {
-  memtrace(drcontext); /* dump any remaining buffer entries */
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+
+  pthread_mutex_lock(mutex);
+  --live_thread_count;
+  if (current_thread_id == data->thread_id) {
+    previous_thread_id = current_thread_id;
+    current_thread_id = 0;
+  }
+  printf("Thread %d is done, will no longer be scheduled.\n", data->thread_id);
+  pthread_cond_broadcast(cond);
+  pthread_mutex_unlock(mutex);
+
   dr_thread_free(drcontext, data, sizeof(ThreadData));
 }
 
@@ -200,6 +243,11 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
 
   the_client_id = id;
   the_mutex = dr_mutex_create();
+
+  mutex = (pthread_mutex_t*) dr_global_alloc(sizeof(pthread_mutex_t));
+  *mutex = PTHREAD_MUTEX_INITIALIZER;
+  cond = (pthread_cond_t*) dr_global_alloc(sizeof(pthread_cond_t));
+  *cond = PTHREAD_COND_INITIALIZER;
 
   module_data_t* main_module = dr_get_main_module();
   DR_ASSERT(main_module);

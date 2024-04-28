@@ -7,6 +7,7 @@ use_DynamoRIO_extension(client drx)
 use_DynamoRIO_extension(client drsyms)
 
 add_library(runner SHARED runner.cpp common.cpp)
+target_compile_options(runner PRIVATE -pthread)
 configure_DynamoRIO_client(runner)
 use_DynamoRIO_extension(runner drmgr)
 use_DynamoRIO_extension(runner drreg)
