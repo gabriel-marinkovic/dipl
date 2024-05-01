@@ -124,14 +124,14 @@ static String Allocate(void* drcontext, const char* cStr) {
   size_t len = strlen(cStr);
   String result = DrThreadAllocArray<uint8_t>(drcontext, len + 1);
   memcpy(result.address, cStr, len);
-  result.address[result.count] = '\0';
+  result.address[result.count - 1] = '\0';
   return result;
 }
 
 static String Allocate(void* drcontext, String string) {
   String result = DrThreadAllocArray<uint8_t>(drcontext, string.count + 1);
   memcpy(result.address, string.address, string.count);
-  result.address[result.count] = '\0';
+  result.address[result.count - 1] = '\0';
   return result;
 }
 
