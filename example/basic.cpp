@@ -2,18 +2,12 @@
 #include <thread>
 #include <cassert>
 #include <iostream>
-#include <latch>
 
 extern "C" void __attribute__((noinline)) BeginInstrumentation() {__asm__ __volatile__(""); }
 extern "C" void __attribute__((noinline)) EndInstrumentation() { __asm__ __volatile__(""); }
 
-std::latch wait_for_both{2};
-
 std::atomic<int> x{0};
 void test() {
-  wait_for_both.count_down();
-  wait_for_both.wait();
-
   BeginInstrumentation();
 
   int tmp1 = x.load(std::memory_order_seq_cst);

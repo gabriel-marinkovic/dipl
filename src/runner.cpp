@@ -34,11 +34,11 @@ struct InstrumentedInstruction {
 };
 
 static InstrumentedInstruction the_instrumented_instructions[] = {
-  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x130a, 0, 0},
-  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1312, 0, 0},
-  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1318, 0, 0},
-  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1320, 0, 0},
-  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1326, 0, 0},
+  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1216, 0, 0},
+  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x121e, 0, 0},
+  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1224, 0, 0},
+  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x122c, 0, 0},
+  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1232, 0, 0},
 };
 
 /* Allocated TLS slot offsets */
