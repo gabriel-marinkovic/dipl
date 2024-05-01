@@ -15,6 +15,8 @@ using namespace app;
 
 struct ThreadData {
   thread_id_t thread_id;
+  uint64_t thread_idx;
+  void* event;
   uint8_t* seg_base;
 };
 
@@ -64,44 +66,79 @@ static void insert_set_is_instrumenting(void* drcontext, instrlist_t* ilist, ins
                           scratch);
 }
 
-static pthread_mutex_t* mutex;
-static pthread_cond_t* cond;
-static int switch_when_zero = 4;
-static thread_id_t current_thread_id = 0;
-static thread_id_t previous_thread_id = 0;
-static int live_thread_count = 0;
-static void clean_call(uintptr_t instr_addr_relative) {
+static uint64_t the_next_thread_idx;
+static void* the_switch_mutex;
+static ThreadData* the_threads[2];
+
+static uint64_t switch_mask = 0b100100;
+
+static void on_thread_enter_instrumentation_region() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  pthread_mutex_lock(mutex);
-  printf("Thread %d trying to continue\n", data->thread_id);
-again:;
-  while (true) {
-    if (live_thread_count == 2) break;
-    if (current_thread_id == data->thread_id) break;
-    if (current_thread_id == 0 && previous_thread_id != data->thread_id) break;
-    printf("Thread %d waiting, live_threads: %d, current_thread_id: %d, previous_thread_id: %d\n", data->thread_id, live_thread_count, current_thread_id, previous_thread_id);
-    pthread_cond_wait(cond, mutex);
-    printf("Thread %d awoken.\n", data->thread_id);
+  data->event = dr_event_create();
+  DR_ASSERT(data->event);
+
+  dr_mutex_lock(the_mutex);
+  data->thread_idx = the_next_thread_idx++;
+  DR_ASSERT(data->thread_idx < ArrayCount(the_threads));
+  the_threads[data->thread_idx] = data;
+  dr_mutex_unlock(the_mutex);
+
+  if (data->thread_idx + 1 < ArrayCount(the_threads)) {
+    dr_event_wait(data->event);
+    dr_event_reset(data->event);
   }
+}
 
-  current_thread_id = data->thread_id;
+static void on_thread_exit_instrumentation_region() {
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  bool switch_away = false;
-  if (--switch_when_zero == 0) {
-    printf("Thread %d will no longer schedule itself\n", data->thread_id);
-    previous_thread_id = current_thread_id;
-    current_thread_id = 0;
-    switch_when_zero = 4;
-    switch_away = true;
-    pthread_cond_broadcast(cond);
-    goto again;
+  dr_mutex_lock(the_switch_mutex);
+  the_threads[data->thread_idx] = NULL;
+
+  bool unlocked = false;
+  for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
+    uint64_t next_thread_idx = (data->thread_idx + i) % ArrayCount(the_threads);
+    ThreadData* other = the_threads[next_thread_idx];
+    if (!other) continue;
+    DR_ASSERT(other != data);
+    dr_mutex_unlock(the_switch_mutex);
+    unlocked = true;
+    dr_event_signal(other->event);
+    break;
   }
+  if (!unlocked) dr_mutex_unlock(the_switch_mutex);
 
-  pthread_mutex_unlock(mutex);
+  bool ok = dr_event_destroy(data->event);
+  DR_ASSERT(ok);
+}
 
-  printf("Thread %d is continuing from instr %p\n", data->thread_id, reinterpret_cast<void*>(instr_addr_relative));
+static void context_switch_point(uintptr_t instr_addr_relative) {
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+
+  dr_mutex_lock(the_switch_mutex);
+  bool should_switch = switch_mask & 1;
+  switch_mask >>= 1;
+
+  bool unlocked = false;
+  if (should_switch) {
+    for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
+      uint64_t next_thread_idx = (data->thread_idx + i) % ArrayCount(the_threads);
+      ThreadData* other = the_threads[next_thread_idx];
+      if (!other) continue;
+      DR_ASSERT(other != data);
+      dr_mutex_unlock(the_switch_mutex);
+      unlocked = true;
+      dr_event_signal(other->event);
+      dr_event_wait(data->event);
+      dr_event_reset(data->event);
+      break;
+    }
+  }
+  if (!unlocked) dr_mutex_unlock(the_switch_mutex);
 }
 
 static void instrument_instr(void* drcontext, instrlist_t* ilist, instr_t* where, instr_t* instr) {
@@ -138,14 +175,19 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
     if (!instr.profiled_instruction_absolute) continue;
     if (instr.profiled_instruction_absolute != instr_addr) continue;
 
-    printf("inserting clean call...\n");
     // RECONSIDER: save fp state?
-    dr_insert_clean_call(drcontext, bb, where, (void*)clean_call, true, 1, OPND_CREATE_INTPTR(instr.profiled_instruction_relative));
+    dr_insert_clean_call(drcontext, bb, where, (void*)context_switch_point, true, 1, OPND_CREATE_INTPTR(instr.profiled_instruction_relative));
     break;
   }
 
+  if (instr_addr == the_begin_instrumentation_address) {
+    dr_insert_clean_call(drcontext, bb, where, (void*)on_thread_enter_instrumentation_region, true, 0);
+  } else if (instr_addr == the_end_instrumentation_address) {
+    dr_insert_clean_call(drcontext, bb, where, (void*)on_thread_exit_instrumentation_region, true, 0);
+  }
+
   // NOTE: See XXX i#1698: there are constraints for code between ldrex/strex pair...
-  //dr_insert_clean_call(drcontext, bb, where, (void*)clean_call, false, 0);
+  //dr_insert_clean_call(drcontext, bb, where, (void*)context_switch_point, false, 0);
 
   return DR_EMIT_DEFAULT;
 }
@@ -173,10 +215,6 @@ static void event_thread_init(void* drcontext) {
   data->seg_base = (uint8_t*)dr_get_dr_segment_base(tls_seg);
   DR_ASSERT(data->seg_base);
   IS_INSTRUMENTING(data->seg_base) = 0;
-
-  pthread_mutex_lock(mutex);
-  ++live_thread_count;
-  pthread_mutex_unlock(mutex);
 }
 
 static void event_module_load(void* drcontext, const module_data_t* info, bool loaded) {
@@ -188,23 +226,12 @@ static void event_module_load(void* drcontext, const module_data_t* info, bool l
     DR_ASSERT(instr.base == 0);
     instr.base = reinterpret_cast<uintptr_t>(info->start);
     instr.profiled_instruction_absolute = instr.base + instr.profiled_instruction_relative;
-    printf("Initialized instr: %p\n", reinterpret_cast<void*>(instr.profiled_instruction_relative));
+    //printf("Initialized instr: %p\n", reinterpret_cast<void*>(instr.profiled_instruction_relative));
   }
 }
 
 static void event_thread_exit(void* drcontext) {
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
-
-  pthread_mutex_lock(mutex);
-  --live_thread_count;
-  if (current_thread_id == data->thread_id) {
-    previous_thread_id = current_thread_id;
-    current_thread_id = 0;
-  }
-  printf("Thread %d is done, will no longer be scheduled.\n", data->thread_id);
-  pthread_cond_broadcast(cond);
-  pthread_mutex_unlock(mutex);
-
   dr_thread_free(drcontext, data, sizeof(ThreadData));
 }
 
@@ -219,6 +246,7 @@ static void event_exit(void) {
     DR_ASSERT(false);
 
   dr_mutex_destroy(the_mutex);
+  dr_mutex_destroy(the_switch_mutex);
   drutil_exit();
   drmgr_exit();
   drx_exit();
@@ -243,11 +271,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
 
   the_client_id = id;
   the_mutex = dr_mutex_create();
-
-  mutex = (pthread_mutex_t*) dr_global_alloc(sizeof(pthread_mutex_t));
-  *mutex = PTHREAD_MUTEX_INITIALIZER;
-  cond = (pthread_cond_t*) dr_global_alloc(sizeof(pthread_cond_t));
-  *cond = PTHREAD_COND_INITIALIZER;
+  the_switch_mutex = dr_mutex_create();
 
   module_data_t* main_module = dr_get_main_module();
   DR_ASSERT(main_module);

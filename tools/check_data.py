@@ -263,3 +263,7 @@ for instr in instrumented:
     print(instr.addr2line_output)
 
 print(len(instrumented_trimmed))
+
+print("TO COPY-PASTE:")
+for instr in instrumented:
+    print(f"0x{instr.offset:x}")
