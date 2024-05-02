@@ -1,12 +1,12 @@
 #include <stdio.h>
 #include <string.h>
-#include <pthread.h>
 
 #include "dr_api.h"
 #include "drmgr.h"
 #include "drreg.h"
 #include "drsyms.h"
 #include "drutil.h"
+#include "drwrap.h"
 #include "drx.h"
 
 #include "common.h"
@@ -14,6 +14,8 @@
 using namespace app;
 
 struct ThreadData {
+  bool initialized_instrumentation;
+  int volatile running;
   thread_id_t thread_id;
   uint64_t thread_idx;
   void* event;
@@ -23,22 +25,19 @@ struct ThreadData {
 static void* the_mutex;
 static client_id_t the_client_id;
 
-uintptr_t the_begin_instrumentation_address;
-uintptr_t the_end_instrumentation_address;
-
 struct InstrumentedInstruction {
-  String    path;
+  String path;
   uintptr_t profiled_instruction_relative;
   uintptr_t base;
   uintptr_t profiled_instruction_absolute;
 };
 
 static InstrumentedInstruction the_instrumented_instructions[] = {
-  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1216, 0, 0},
-  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x121e, 0, 0},
-  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1224, 0, 0},
-  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x122c, 0, 0},
-  {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1232, 0, 0},
+    {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1230, 0, 0},
+    {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1238, 0, 0},
+    {Wrap("/home/gabriel/dipl/build/example/basic"), 0x123e, 0, 0},
+    {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1246, 0, 0},
+    {Wrap("/home/gabriel/dipl/build/example/basic"), 0x124c, 0, 0},
 };
 
 /* Allocated TLS slot offsets */
@@ -67,69 +66,130 @@ static void insert_set_is_instrumenting(void* drcontext, instrlist_t* ilist, ins
 }
 
 static uint64_t the_next_thread_idx;
+// RECONSIDER: Do we need this lock?
 static void* the_switch_mutex;
 static ThreadData* the_threads[2];
 
-static uint64_t switch_mask = 0b100100;
+static int volatile the_last_run;
+static int volatile the_in_test_count;
 
-static void on_thread_enter_instrumentation_region() {
+static uint64_t next_switch_mask = 0;
+static uint64_t switch_mask = 0;
+
+static bool WrapNextRun() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  data->event = dr_event_create();
-  DR_ASSERT(data->event);
+  dr_printf("Hello from WrapNextRun!\n");
 
-  dr_mutex_lock(the_mutex);
-  data->thread_idx = the_next_thread_idx++;
-  DR_ASSERT(data->thread_idx < ArrayCount(the_threads));
-  the_threads[data->thread_idx] = data;
-  dr_mutex_unlock(the_mutex);
+  bool is_last_run = dr_atomic_load32(&the_last_run) != 0;
 
-  if (data->thread_idx + 1 < ArrayCount(the_threads)) {
-    dr_event_wait(data->event);
-    dr_event_reset(data->event);
+  dr_atomic_store32(&data->running, 1);
+  bool first = dr_atomic_add32_return_sum(&the_in_test_count, 1) == 1;
+  if (first) {
+    // We are the first in this test run, we get to set the switch mask.
+    // RECONSIDER: This might be more natural to set in `ReportTestResult`.
+    switch_mask = ++next_switch_mask;
+    dr_printf("switch mask is now 0x%x\n", switch_mask);
+    if (switch_mask >= 20) {
+      dr_printf("This is the last run\n");
+      dr_atomic_store32(&the_last_run, 1);
+    }
   }
+
+  // Initialize the event on the first run.
+  // We can't do this in `event_thread_init` because we don't know if a thread is a test thread or for example the main
+  // application thread.
+  if (!data->initialized_instrumentation) {
+    data->event = dr_event_create();
+    DR_ASSERT(data->event);
+
+    dr_mutex_lock(the_mutex);
+    data->thread_idx = the_next_thread_idx++;
+    DR_ASSERT(data->thread_idx < ArrayCount(the_threads));
+    the_threads[data->thread_idx] = data;
+    dr_mutex_unlock(the_mutex);
+
+    if (data->thread_idx + 1 < ArrayCount(the_threads)) {
+      dr_printf("Thread %d waiting\n", data->thread_idx);
+      dr_event_wait(data->event);
+      dr_event_reset(data->event);
+    }
+
+    dr_printf("Thread %d done with initialization\n", data->thread_idx);
+    data->initialized_instrumentation = true;
+  }
+
+  drwrap_replace_native_fini(drcontext);
+  return !is_last_run;
 }
 
-static void on_thread_exit_instrumentation_region() {
+static void WrapReportTestResult(bool result) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  dr_mutex_lock(the_switch_mutex);
-  the_threads[data->thread_idx] = NULL;
+  dr_printf("Hello from WrapReportTestResult! %d\n", result);
 
-  bool unlocked = false;
-  for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
-    uint64_t next_thread_idx = (data->thread_idx + i) % ArrayCount(the_threads);
-    ThreadData* other = the_threads[next_thread_idx];
-    if (!other) continue;
-    DR_ASSERT(other != data);
-    dr_mutex_unlock(the_switch_mutex);
-    unlocked = true;
-    dr_event_signal(other->event);
-    break;
-  }
-  if (!unlocked) dr_mutex_unlock(the_switch_mutex);
+  dr_atomic_store32(&data->running, 0);
+  int remaining = dr_atomic_add32_return_sum(&the_in_test_count, -1);
+  DR_ASSERT(remaining >= 0);
 
-  bool ok = dr_event_destroy(data->event);
-  DR_ASSERT(ok);
-}
-
-static void context_switch_point(uintptr_t instr_addr_relative) {
-  void* drcontext = dr_get_current_drcontext();
-  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
-
-  dr_mutex_lock(the_switch_mutex);
-  bool should_switch = switch_mask & 1;
-  switch_mask >>= 1;
-
-  bool unlocked = false;
-  if (should_switch) {
+  if (remaining > 0) {
+    // There are still other threads running, so wake someone else.
+    bool awoken_someone = false;
+    dr_mutex_lock(the_switch_mutex);
     for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
       uint64_t next_thread_idx = (data->thread_idx + i) % ArrayCount(the_threads);
       ThreadData* other = the_threads[next_thread_idx];
-      if (!other) continue;
+      DR_ASSERT(other);
       DR_ASSERT(other != data);
+      if (!dr_atomic_load32(&other->running)) continue;
+      dr_event_signal(other->event);
+      awoken_someone = true;
+      break;
+    }
+    dr_mutex_unlock(the_switch_mutex);
+    DR_ASSERT(awoken_someone);
+
+    // Wait for our turn.
+    dr_event_wait(data->event);
+    dr_event_reset(data->event);
+  } else {
+    // We are the last thread in this test run. Everyone else is sleeping, wake them all up.
+    // RECONSIDER: This might be more natural to do in `WrapNextRun`.
+    dr_mutex_lock(the_switch_mutex);
+    for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
+      uint64_t next_thread_idx = (data->thread_idx + i) % ArrayCount(the_threads);
+      ThreadData* other = the_threads[next_thread_idx];
+      DR_ASSERT(other);
+      DR_ASSERT(other != data);
+      DR_ASSERT(!dr_atomic_load32(&other->running));
+      dr_event_signal(other->event);
+      break;
+    }
+    dr_mutex_unlock(the_switch_mutex);
+  }
+
+  drwrap_replace_native_fini(drcontext);
+}
+
+static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+
+  bool should_switch = switch_mask & 1;
+  switch_mask >>= 1;
+
+  if (should_switch) {
+    bool unlocked = false;
+    dr_mutex_lock(the_switch_mutex);
+    for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
+      uint64_t next_thread_idx = (data->thread_idx + i) % ArrayCount(the_threads);
+      ThreadData* other = the_threads[next_thread_idx];
+      DR_ASSERT(other);
+      DR_ASSERT(other != data);
+      if (!dr_atomic_load32(&other->running)) continue;
+
       dr_mutex_unlock(the_switch_mutex);
       unlocked = true;
       dr_event_signal(other->event);
@@ -137,8 +197,8 @@ static void context_switch_point(uintptr_t instr_addr_relative) {
       dr_event_reset(data->event);
       break;
     }
+    if (!unlocked) dr_mutex_unlock(the_switch_mutex);
   }
-  if (!unlocked) dr_mutex_unlock(the_switch_mutex);
 }
 
 static void instrument_instr(void* drcontext, instrlist_t* ilist, instr_t* where, instr_t* instr) {
@@ -165,7 +225,6 @@ static void instrument_instr(void* drcontext, instrlist_t* ilist, instr_t* where
 
 static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrlist_t* bb, instr_t* where,
                                              bool for_trace, bool translating, void* user_data) {
-
   instr_t* instr_fetch = drmgr_orig_app_instr_for_fetch(drcontext);
   if (!instr_fetch) return DR_EMIT_DEFAULT;
   instrument_instr(drcontext, bb, where, instr_fetch);
@@ -176,18 +235,13 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
     if (instr.profiled_instruction_absolute != instr_addr) continue;
 
     // RECONSIDER: save fp state?
-    dr_insert_clean_call(drcontext, bb, where, (void*)context_switch_point, true, 1, OPND_CREATE_INTPTR(instr.profiled_instruction_relative));
+    dr_insert_clean_call(drcontext, bb, where, (void*)ContextSwitchPoint, true, 1,
+                         OPND_CREATE_INTPTR(instr.profiled_instruction_relative));
     break;
   }
 
-  if (instr_addr == the_begin_instrumentation_address) {
-    dr_insert_clean_call(drcontext, bb, where, (void*)on_thread_enter_instrumentation_region, true, 0);
-  } else if (instr_addr == the_end_instrumentation_address) {
-    dr_insert_clean_call(drcontext, bb, where, (void*)on_thread_exit_instrumentation_region, true, 0);
-  }
-
   // NOTE: See XXX i#1698: there are constraints for code between ldrex/strex pair...
-  //dr_insert_clean_call(drcontext, bb, where, (void*)context_switch_point, false, 0);
+  // dr_insert_clean_call(drcontext, bb, where, (void*)ContextSwitchPoint, false, 0);
 
   return DR_EMIT_DEFAULT;
 }
@@ -209,6 +263,7 @@ static dr_emit_flags_t event_bb_app2app(void* drcontext, void* tag, instrlist_t*
 static void event_thread_init(void* drcontext) {
   ThreadData* data = (ThreadData*)dr_thread_alloc(drcontext, sizeof(ThreadData));
   DR_ASSERT(data != NULL);
+  memset(data, 0, sizeof(*data));
   drmgr_set_tls_field(drcontext, the_tls_idx, data);
 
   data->thread_id = dr_get_thread_id(drcontext);
@@ -226,7 +281,7 @@ static void event_module_load(void* drcontext, const module_data_t* info, bool l
     DR_ASSERT(instr.base == 0);
     instr.base = reinterpret_cast<uintptr_t>(info->start);
     instr.profiled_instruction_absolute = instr.base + instr.profiled_instruction_relative;
-    //printf("Initialized instr: %p\n", reinterpret_cast<void*>(instr.profiled_instruction_relative));
+    // printf("Initialized instr: %p\n", reinterpret_cast<void*>(instr.profiled_instruction_relative));
   }
 }
 
@@ -249,6 +304,7 @@ static void event_exit(void) {
   dr_mutex_destroy(the_switch_mutex);
   drutil_exit();
   drmgr_exit();
+  drwrap_exit();
   drx_exit();
   drsym_exit();
 }
@@ -258,7 +314,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   drreg_options_t ops = {sizeof(ops), 3, false};
   dr_set_client_name("Runner", "");
 
-  if (!drmgr_init() || drreg_init(&ops) != DRREG_SUCCESS || !drutil_init() || !drx_init() ||
+  if (!drmgr_init() || drreg_init(&ops) != DRREG_SUCCESS || !drutil_init() || !drwrap_init() || !drx_init() ||
       drsym_init(0) != DRSYM_SUCCESS)
     DR_ASSERT(false);
 
@@ -276,18 +332,26 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   module_data_t* main_module = dr_get_main_module();
   DR_ASSERT(main_module);
 
-  size_t begin_instrumentation_address = 0;
-  size_t end_instrumentation_address = 0;
+  size_t next_run_offset = 0;
+  size_t report_test_result_offset = 0;
   drsym_error_t status;
-  status = drsym_lookup_symbol(main_module->full_path, "BeginInstrumentation", &begin_instrumentation_address,
-                               DRSYM_DEFAULT_FLAGS);
+  status = drsym_lookup_symbol(main_module->full_path, "NextRun", &next_run_offset, DRSYM_DEFAULT_FLAGS);
   DR_ASSERT(status == DRSYM_SUCCESS);
-  status = drsym_lookup_symbol(main_module->full_path, "EndInstrumentation", &end_instrumentation_address,
-                               DRSYM_DEFAULT_FLAGS);
+  status =
+      drsym_lookup_symbol(main_module->full_path, "ReportTestResult", &report_test_result_offset, DRSYM_DEFAULT_FLAGS);
   DR_ASSERT(status == DRSYM_SUCCESS);
 
-  the_begin_instrumentation_address = reinterpret_cast<uintptr_t>(begin_instrumentation_address + main_module->start);
-  the_end_instrumentation_address = reinterpret_cast<uintptr_t>(end_instrumentation_address + main_module->start);
+  uintptr_t next_run_addr = reinterpret_cast<uintptr_t>(main_module->start) + next_run_offset;
+  uintptr_t report_test_result_addr = reinterpret_cast<uintptr_t>(main_module->start) + report_test_result_offset;
+
+  bool ok;
+  ok = drwrap_replace_native(reinterpret_cast<app_pc>(next_run_addr),
+                             reinterpret_cast<app_pc>(reinterpret_cast<void*>(WrapNextRun)), true, 0, NULL, false);
+  DR_ASSERT(ok);
+  ok = drwrap_replace_native(reinterpret_cast<app_pc>(report_test_result_addr),
+                             reinterpret_cast<app_pc>(reinterpret_cast<void*>(WrapReportTestResult)), true, 0, NULL,
+                             false);
+  DR_ASSERT(ok);
 
   dr_free_module_data(main_module);
 
