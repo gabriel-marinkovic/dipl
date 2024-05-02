@@ -41,6 +41,7 @@
 #include "drreg.h"
 #include "drsyms.h"
 #include "drutil.h"
+#include "drwrap.h"
 #include "drx.h"
 
 #include "common.h"
@@ -465,12 +466,25 @@ static void event_exit(void) {
   the_module_writer.FlushAndDestroy();
   dr_mutex_destroy(the_mutex);
   dr_mutex_destroy(the_module_mutex);
-  drutil_exit();
   drmgr_exit();
+  drutil_exit();
+  drwrap_exit();
   drx_exit();
   drsym_exit();
 
   // printf("we done\n");
+}
+
+static int wrap_next_run_counter_till_false = 2;
+static bool WrapNextRun() {
+  printf("Hello from WrapNextRun!\n");
+  int counter = --wrap_next_run_counter_till_false;
+  drwrap_replace_native_fini(dr_get_current_drcontext());
+  return counter > 0;
+}
+static void WrapReportTestResult(bool result) {
+  printf("Hello from WrapReportTestResult! %d\n", result);
+  drwrap_replace_native_fini(dr_get_current_drcontext());
 }
 
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
@@ -478,7 +492,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   drreg_options_t ops = {sizeof(ops), 3, false};
   dr_set_client_name("DynamoRIO Sample Client 'memtrace'", "http://dynamorio.org/issues");
 
-  if (!drmgr_init() || drreg_init(&ops) != DRREG_SUCCESS || !drutil_init() || !drx_init() ||
+  if (!drmgr_init() || drreg_init(&ops) != DRREG_SUCCESS || !drutil_init() || !drwrap_init() || !drx_init() ||
       drsym_init(0) != DRSYM_SUCCESS)
     DR_ASSERT(false);
 
@@ -499,21 +513,26 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   module_data_t* main_module = dr_get_main_module();
   DR_ASSERT(main_module);
 
-  size_t begin_instrumentation_address = 0;
-  size_t end_instrumentation_address = 0;
+  size_t next_run_address = 0;
+  size_t report_test_result_address = 0;
   drsym_error_t status;
-  status = drsym_lookup_symbol(main_module->full_path, "BeginInstrumentation", &begin_instrumentation_address,
-                               DRSYM_DEFAULT_FLAGS);
+  status = drsym_lookup_symbol(main_module->full_path, "NextRun", &next_run_address, DRSYM_DEFAULT_FLAGS);
   DR_ASSERT(status == DRSYM_SUCCESS);
-  status = drsym_lookup_symbol(main_module->full_path, "EndInstrumentation", &end_instrumentation_address,
-                               DRSYM_DEFAULT_FLAGS);
+  status =
+      drsym_lookup_symbol(main_module->full_path, "ReportTestResult", &report_test_result_address, DRSYM_DEFAULT_FLAGS);
   DR_ASSERT(status == DRSYM_SUCCESS);
 
-  the_begin_instrumentation_address = reinterpret_cast<uintptr_t>(begin_instrumentation_address + main_module->start);
-  the_end_instrumentation_address = reinterpret_cast<uintptr_t>(end_instrumentation_address + main_module->start);
+  the_begin_instrumentation_address = reinterpret_cast<uintptr_t>(next_run_address + main_module->start);
+  the_end_instrumentation_address = reinterpret_cast<uintptr_t>(report_test_result_address + main_module->start);
 
-  // printf("BeginInstrumentation: %p\n", reinterpret_cast<void*>(the_begin_instrumentation_address));
-  // printf("EndInstrumentation: %p\n", reinterpret_cast<void*>(the_end_instrumentation_address));
+  bool ok;
+  ok = drwrap_replace_native(reinterpret_cast<app_pc>(the_begin_instrumentation_address),
+                             reinterpret_cast<app_pc>(reinterpret_cast<void*>(WrapNextRun)), true, 0, NULL, false);
+  DR_ASSERT(ok);
+  ok = drwrap_replace_native(reinterpret_cast<app_pc>(the_end_instrumentation_address),
+                             reinterpret_cast<app_pc>(reinterpret_cast<void*>(WrapReportTestResult)), true, 0, NULL,
+                             false);
+  DR_ASSERT(ok);
 
   dr_free_module_data(main_module);
 

@@ -3,14 +3,16 @@
 #include <cassert>
 #include <iostream>
 
+volatile bool false_literal_prevent_optimization = false;
+
 extern "C" bool __attribute__((noinline)) NextRun() {
   __asm__ __volatile__("");
-  return false;
+  return false_literal_prevent_optimization;
 }
 
 extern "C" bool __attribute__((noinline)) Initializing() {
   __asm__ __volatile__("");
-  return false;
+  return false_literal_prevent_optimization;
 }
 
 extern "C" void __attribute__((noinline)) ReportTestResult(bool ok) {
@@ -43,6 +45,8 @@ void test() {
 }
 
 int main() {
+  std::cout << "HELLO FROM APP" << std::endl;
+
   std::thread t1(test);
   std::thread t2(test);
 
