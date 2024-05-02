@@ -3,25 +3,42 @@
 #include <cassert>
 #include <iostream>
 
-extern "C" void __attribute__((noinline)) BeginInstrumentation() {__asm__ __volatile__(""); }
-extern "C" void __attribute__((noinline)) EndInstrumentation() { __asm__ __volatile__(""); }
+extern "C" bool __attribute__((noinline)) NextRun() {
+  __asm__ __volatile__("");
+  return false;
+}
+
+extern "C" bool __attribute__((noinline)) Initializing() {
+  __asm__ __volatile__("");
+  return false;
+}
+
+extern "C" void __attribute__((noinline)) ReportTestResult(bool ok) {
+  __asm__ __volatile__("");
+}
 
 std::atomic<int> x{0};
+
+// Plan:
+// Leave `Initializing` for last
+// 1) Rename Begin/End into `NextRun` and `ReportTestResult`
+// 2) Wrap them
+
 void test() {
-  BeginInstrumentation();
+  while (NextRun()) {
+    if (Initializing()) {
+      x = 0;
+    }
 
-  int tmp1 = x.load(std::memory_order_seq_cst);
-  x.store(tmp1 + 1, std::memory_order_seq_cst);
+    int tmp1 = x.load(std::memory_order_seq_cst);
+    x.store(tmp1 + 1, std::memory_order_seq_cst);
 
-  int tmp2 = x.load(std::memory_order_seq_cst);
-  x.store(tmp2 - 1, std::memory_order_seq_cst);
+    int tmp2 = x.load(std::memory_order_seq_cst);
+    x.store(tmp2 - 1, std::memory_order_seq_cst);
 
-  int tmp3 = x.load(std::memory_order_seq_cst);
+    int tmp3 = x.load(std::memory_order_seq_cst);
 
-  EndInstrumentation();
-
-  if (tmp3 != 0) {
-    std::cout << "FATAL ERROR IN `basic`!!!" << std::endl;
+    ReportTestResult(tmp3 == 0);
   }
 }
 
