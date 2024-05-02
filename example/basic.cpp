@@ -3,6 +3,7 @@
 #include <cassert>
 #include <iostream>
 
+volatile bool sink_prevent_optimization;
 volatile bool false_literal_prevent_optimization = false;
 
 extern "C" bool __attribute__((noinline)) NextRun() {
@@ -17,6 +18,7 @@ extern "C" bool __attribute__((noinline)) Initializing() {
 
 extern "C" void __attribute__((noinline)) ReportTestResult(bool ok) {
   __asm__ __volatile__("");
+  sink_prevent_optimization = ok;
 }
 
 std::atomic<int> x{0};

@@ -67,6 +67,7 @@ struct MemoryReference {
 #define MEM_BUF_SIZE (sizeof(MemoryReference) * MAX_NUM_MEM_REFS)
 
 struct ThreadData {
+  bool entered_instrumentation;
   uint8_t* seg_base;
   MemoryReference* buf_base;
   uint64_t num_refs;
@@ -79,9 +80,6 @@ static uint64_t the_total_memory_reference_count;
 
 static void* the_module_mutex;
 static BufferedFileWriter the_module_writer;
-
-uintptr_t the_begin_instrumentation_address;
-uintptr_t the_end_instrumentation_address;
 
 /* Allocated TLS slot offsets */
 enum TlsOffset {
@@ -255,108 +253,22 @@ static void instrument_mem(void* drcontext, instrlist_t* ilist, instr_t* where, 
     DR_ASSERT(false);
 }
 
-static void instrument_control_transfer_instr(void* drcontext, instrlist_t* ilist, instr_t* where, opnd_t target) {
-  /* We need two scratch registers */
-  reg_id_t reg_ptr, reg_addr;
-  if (drreg_reserve_register(drcontext, ilist, where, NULL, &reg_ptr) != DRREG_SUCCESS ||
-      drreg_reserve_register(drcontext, ilist, where, NULL, &reg_addr) != DRREG_SUCCESS ||
-      drreg_reserve_aflags(drcontext, ilist, where) != DRREG_SUCCESS) {
-    DR_ASSERT(false);
-    return;
-  }
-
-  if (opnd_is_memory_reference(target)) {
-    // We use reg_ptr as scratch to get addr.
-    bool ok = drutil_insert_get_mem_addr(drcontext, ilist, where, target, reg_addr, reg_ptr);
-    DR_ASSERT(ok);
-
-    instr_t* label_begin_instrumentation = INSTR_CREATE_label(drcontext);
-    instr_t* label_end_instrumentation = INSTR_CREATE_label(drcontext);
-    instr_t* label_skip = INSTR_CREATE_label(drcontext);
-
-    // Load `the_begin_instrumentation_address` into `reg_ptr` (which we are currently using as a scratch register).
-    insert_cmp_with_ptr(drcontext, ilist, where, the_begin_instrumentation_address, reg_addr, reg_ptr);
-    instrlist_meta_preinsert(
-        ilist, where, XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(label_begin_instrumentation)));
-
-    insert_cmp_with_ptr(drcontext, ilist, where, the_end_instrumentation_address, reg_addr, reg_ptr);
-    instrlist_meta_preinsert(
-        ilist, where, XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(label_end_instrumentation)));
-
-    instrlist_meta_preinsert(ilist, where, XINST_CREATE_jump(drcontext, opnd_create_instr(label_skip)));
-
-    instrlist_meta_preinsert(ilist, where, label_begin_instrumentation);
-    insert_set_is_instrumenting(drcontext, ilist, where, 1, reg_ptr);
-    instrlist_meta_preinsert(ilist, where, XINST_CREATE_jump(drcontext, opnd_create_instr(label_skip)));
-
-    instrlist_meta_preinsert(ilist, where, label_end_instrumentation);
-    insert_set_is_instrumenting(drcontext, ilist, where, 0, reg_ptr);
-
-    instrlist_meta_preinsert(ilist, where, label_skip);
-  } else if (opnd_is_pc(target)) {
-    uintptr_t address = reinterpret_cast<uintptr_t>(opnd_get_pc(target));
-    if (address == the_begin_instrumentation_address) {
-      insert_set_is_instrumenting(drcontext, ilist, where, 1, reg_ptr);
-    } else if (address == the_end_instrumentation_address) {
-      insert_set_is_instrumenting(drcontext, ilist, where, 0, reg_ptr);
-    }
-  } else if (opnd_is_immed(target)) {
-    uint64_t address = opnd_get_immed_int64(target);
-    if (address == the_begin_instrumentation_address) {
-      insert_set_is_instrumenting(drcontext, ilist, where, 1, reg_ptr);
-    } else if (address == the_end_instrumentation_address) {
-      insert_set_is_instrumenting(drcontext, ilist, where, 0, reg_ptr);
-    }
-  } else {
-    DR_ASSERT(false);
-  }
-
-  /* Restore scratch registers */
-  if (drreg_unreserve_register(drcontext, ilist, where, reg_ptr) != DRREG_SUCCESS ||
-      drreg_unreserve_register(drcontext, ilist, where, reg_addr) != DRREG_SUCCESS ||
-      drreg_unreserve_aflags(drcontext, ilist, where) != DRREG_SUCCESS)
-    DR_ASSERT(false);
-}
-
 /* For each memory reference app instr, we insert inline code to fill the buffer
  * with an instruction entry and memory reference entries.
  */
 static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrlist_t* bb, instr_t* where,
                                              bool for_trace, bool translating, void* user_data) {
-  /* Insert code to add an entry for each app instruction. */
-  /* Use the drmgr_orig_app_instr_* interface to properly handle our own use
-   * of drutil_expand_rep_string() and drx_expand_scatter_gather() (as well
-   * as another client/library emulating the instruction stream).
-   */
-
-  // If it happens that we can call `instrument_control_transfer_instr` for this instruction, `instrument_instr` must be
-  // called after it. Wrap `instrument_control_transfer_instr` and either call it `instrument_control_transfer_instr`,
-  // or immediately if ``instrument_control_transfer_instr` can't be called here.
-  auto maybe_instrument_instr = [&]() {
-    instr_t* instr_fetch = drmgr_orig_app_instr_for_fetch(drcontext);
-    if (!instr_fetch) return;
+  instr_t* instr_fetch = drmgr_orig_app_instr_for_fetch(drcontext);
+  if (instr_fetch) {
     DR_ASSERT(instr_is_app(instr_fetch));
     if (instr_reads_memory(instr_fetch) || instr_writes_memory(instr_fetch)) {
       instrument_instr(drcontext, bb, where, instr_fetch);
     }
-  };
+  }
 
-  /* Insert code to add an entry for each memory reference opnd. */
   instr_t* instr_operands = drmgr_orig_app_instr_for_operands(drcontext);
-  if (instr_operands == NULL) {
-    maybe_instrument_instr();
-    return DR_EMIT_DEFAULT;
-  }
+  if (!instr_operands) return DR_EMIT_DEFAULT;
   DR_ASSERT(instr_is_app(instr_operands));
-
-  if (instr_is_cti(instr_operands)) {
-    const opnd_t target = instr_get_target(instr_operands);
-    if (opnd_is_memory_reference(target) || opnd_is_pc(target) || opnd_is_immed(target)) {
-      instrument_control_transfer_instr(drcontext, bb, where, target);
-    }
-  }
-
-  maybe_instrument_instr();
 
   if (instr_reads_memory(instr_operands) || instr_writes_memory(instr_operands)) {
     for (int i = 0; i < instr_num_srcs(instr_operands); i++) {
@@ -407,6 +319,7 @@ static dr_emit_flags_t event_bb_app2app(void* drcontext, void* tag, instrlist_t*
 
 static void event_thread_init(void* drcontext) {
   ThreadData* data = (ThreadData*)dr_thread_alloc(drcontext, sizeof(ThreadData));
+  memset(data, 0, sizeof(*data));
   DR_ASSERT(data != NULL);
   drmgr_set_tls_field(drcontext, the_tls_idx, data);
 
@@ -475,16 +388,31 @@ static void event_exit(void) {
   // printf("we done\n");
 }
 
-static int wrap_next_run_counter_till_false = 2;
 static bool WrapNextRun() {
-  printf("Hello from WrapNextRun!\n");
-  int counter = --wrap_next_run_counter_till_false;
-  drwrap_replace_native_fini(dr_get_current_drcontext());
-  return counter > 0;
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+
+  dr_printf("Hello from WrapNextRun!\n");
+
+  bool was_instrumenting = data->entered_instrumentation;
+  if (!was_instrumenting) {
+    DR_ASSERT(IS_INSTRUMENTING(data->seg_base) == 0);
+    IS_INSTRUMENTING(data->seg_base) = 1;
+  }
+  data->entered_instrumentation = true;
+  drwrap_replace_native_fini(drcontext);
+  return !was_instrumenting;
 }
+
 static void WrapReportTestResult(bool result) {
-  printf("Hello from WrapReportTestResult! %d\n", result);
-  drwrap_replace_native_fini(dr_get_current_drcontext());
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+
+  dr_printf("Hello from WrapReportTestResult! %d\n", result);
+
+  DR_ASSERT(IS_INSTRUMENTING(data->seg_base));
+  IS_INSTRUMENTING(data->seg_base) = 0;
+  drwrap_replace_native_fini(drcontext);
 }
 
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
@@ -513,23 +441,23 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   module_data_t* main_module = dr_get_main_module();
   DR_ASSERT(main_module);
 
-  size_t next_run_address = 0;
-  size_t report_test_result_address = 0;
+  size_t next_run_offset = 0;
+  size_t report_test_result_offset = 0;
   drsym_error_t status;
-  status = drsym_lookup_symbol(main_module->full_path, "NextRun", &next_run_address, DRSYM_DEFAULT_FLAGS);
+  status = drsym_lookup_symbol(main_module->full_path, "NextRun", &next_run_offset, DRSYM_DEFAULT_FLAGS);
   DR_ASSERT(status == DRSYM_SUCCESS);
   status =
-      drsym_lookup_symbol(main_module->full_path, "ReportTestResult", &report_test_result_address, DRSYM_DEFAULT_FLAGS);
+      drsym_lookup_symbol(main_module->full_path, "ReportTestResult", &report_test_result_offset, DRSYM_DEFAULT_FLAGS);
   DR_ASSERT(status == DRSYM_SUCCESS);
 
-  the_begin_instrumentation_address = reinterpret_cast<uintptr_t>(next_run_address + main_module->start);
-  the_end_instrumentation_address = reinterpret_cast<uintptr_t>(report_test_result_address + main_module->start);
+  uintptr_t next_run_addr = reinterpret_cast<uintptr_t>(main_module->start) + next_run_offset;
+  uintptr_t report_test_result_addr = reinterpret_cast<uintptr_t>(main_module->start) + report_test_result_offset;
 
   bool ok;
-  ok = drwrap_replace_native(reinterpret_cast<app_pc>(the_begin_instrumentation_address),
+  ok = drwrap_replace_native(reinterpret_cast<app_pc>(next_run_addr),
                              reinterpret_cast<app_pc>(reinterpret_cast<void*>(WrapNextRun)), true, 0, NULL, false);
   DR_ASSERT(ok);
-  ok = drwrap_replace_native(reinterpret_cast<app_pc>(the_end_instrumentation_address),
+  ok = drwrap_replace_native(reinterpret_cast<app_pc>(report_test_result_addr),
                              reinterpret_cast<app_pc>(reinterpret_cast<void*>(WrapReportTestResult)), true, 0, NULL,
                              false);
   DR_ASSERT(ok);
