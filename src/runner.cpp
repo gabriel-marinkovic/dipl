@@ -65,9 +65,8 @@ static void insert_set_is_instrumenting(void* drcontext, instrlist_t* ilist, ins
                           scratch);
 }
 
-static uint64_t the_next_thread_idx;
-// RECONSIDER: Do we need this lock?
-static void* the_switch_mutex;
+// TODO: This currently assumes that we will have exactly 2 threads (not more OR less).
+static int volatile the_next_thread_idx;
 static ThreadData* the_threads[2];
 
 static int volatile the_last_run;
@@ -80,7 +79,7 @@ static bool WrapNextRun() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  dr_printf("Hello from WrapNextRun!\n");
+  dr_printf("Hello from WrapNextRun! TID: %d\n", data->thread_idx);
 
   bool is_last_run = dr_atomic_load32(&the_last_run) != 0;
 
@@ -90,8 +89,8 @@ static bool WrapNextRun() {
     // We are the first in this test run, we get to set the switch mask.
     // RECONSIDER: This might be more natural to set in `ReportTestResult`.
     switch_mask = ++next_switch_mask;
-    dr_printf("switch mask is now 0x%x\n", switch_mask);
-    if (switch_mask >= 20) {
+    dr_printf("switch mask is now 0x%x, initially acquired by TID: %d\n", switch_mask, data->thread_idx);
+    if (switch_mask >= 10) {
       dr_printf("This is the last run\n");
       dr_atomic_store32(&the_last_run, 1);
     }
@@ -104,11 +103,9 @@ static bool WrapNextRun() {
     data->event = dr_event_create();
     DR_ASSERT(data->event);
 
-    dr_mutex_lock(the_mutex);
-    data->thread_idx = the_next_thread_idx++;
+    data->thread_idx = dr_atomic_add32_return_sum(&the_next_thread_idx, 1) - 1;
     DR_ASSERT(data->thread_idx < ArrayCount(the_threads));
     the_threads[data->thread_idx] = data;
-    dr_mutex_unlock(the_mutex);
 
     if (data->thread_idx + 1 < ArrayCount(the_threads)) {
       dr_printf("Thread %d waiting\n", data->thread_idx);
@@ -120,6 +117,11 @@ static bool WrapNextRun() {
     data->initialized_instrumentation = true;
   }
 
+  // TODO: Remove, this is a weird assert.
+  for (ThreadData* td : the_threads) {
+    DR_ASSERT(td->event);
+  }
+
   drwrap_replace_native_fini(drcontext);
   return !is_last_run;
 }
@@ -128,27 +130,26 @@ static void WrapReportTestResult(bool result) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  dr_printf("Hello from WrapReportTestResult! %d\n", result);
+  dr_printf("Hello from WrapReportTestResult! %d TID: %d\n", result, data->thread_idx);
 
-  dr_atomic_store32(&data->running, 0);
   int remaining = dr_atomic_add32_return_sum(&the_in_test_count, -1);
+  dr_atomic_store32(&data->running, 0);
   DR_ASSERT(remaining >= 0);
 
   if (remaining > 0) {
     // There are still other threads running, so wake someone else.
     bool awoken_someone = false;
-    dr_mutex_lock(the_switch_mutex);
     for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
       uint64_t next_thread_idx = (data->thread_idx + i) % ArrayCount(the_threads);
       ThreadData* other = the_threads[next_thread_idx];
       DR_ASSERT(other);
       DR_ASSERT(other != data);
-      if (!dr_atomic_load32(&other->running)) continue;
-      dr_event_signal(other->event);
-      awoken_someone = true;
-      break;
+      if (dr_atomic_load32(&other->running)) {
+        dr_event_signal(other->event);
+        awoken_someone = true;
+        break;
+      }
     }
-    dr_mutex_unlock(the_switch_mutex);
     DR_ASSERT(awoken_someone);
 
     // Wait for our turn.
@@ -157,7 +158,6 @@ static void WrapReportTestResult(bool result) {
   } else {
     // We are the last thread in this test run. Everyone else is sleeping, wake them all up.
     // RECONSIDER: This might be more natural to do in `WrapNextRun`.
-    dr_mutex_lock(the_switch_mutex);
     for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
       uint64_t next_thread_idx = (data->thread_idx + i) % ArrayCount(the_threads);
       ThreadData* other = the_threads[next_thread_idx];
@@ -167,7 +167,6 @@ static void WrapReportTestResult(bool result) {
       dr_event_signal(other->event);
       break;
     }
-    dr_mutex_unlock(the_switch_mutex);
   }
 
   drwrap_replace_native_fini(drcontext);
@@ -181,23 +180,18 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
   switch_mask >>= 1;
 
   if (should_switch) {
-    bool unlocked = false;
-    dr_mutex_lock(the_switch_mutex);
     for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
       uint64_t next_thread_idx = (data->thread_idx + i) % ArrayCount(the_threads);
       ThreadData* other = the_threads[next_thread_idx];
       DR_ASSERT(other);
       DR_ASSERT(other != data);
-      if (!dr_atomic_load32(&other->running)) continue;
-
-      dr_mutex_unlock(the_switch_mutex);
-      unlocked = true;
-      dr_event_signal(other->event);
-      dr_event_wait(data->event);
-      dr_event_reset(data->event);
-      break;
+      if (dr_atomic_load32(&other->running)) {
+        dr_event_signal(other->event);
+        dr_event_wait(data->event);
+        dr_event_reset(data->event);
+        break;
+      }
     }
-    if (!unlocked) dr_mutex_unlock(the_switch_mutex);
   }
 }
 
@@ -301,7 +295,6 @@ static void event_exit(void) {
     DR_ASSERT(false);
 
   dr_mutex_destroy(the_mutex);
-  dr_mutex_destroy(the_switch_mutex);
   drutil_exit();
   drmgr_exit();
   drwrap_exit();
@@ -327,7 +320,6 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
 
   the_client_id = id;
   the_mutex = dr_mutex_create();
-  the_switch_mutex = dr_mutex_create();
 
   module_data_t* main_module = dr_get_main_module();
   DR_ASSERT(main_module);
