@@ -89,28 +89,16 @@ static bool WrapNextRun() {
     data->thread_idx = dr_atomic_add32_return_sum(&the_next_thread_idx, 1) - 1;
     DR_ASSERT(data->thread_idx < ArrayCount(the_threads));
     the_threads[data->thread_idx] = data;
-    dr_printf("Thread %d done with initialization\n", data->thread_idx);
     data->initialized_instrumentation = true;
   }
 
-  dr_printf("Hello from WrapNextRun! TID: %d\n", data->thread_idx);
-
-  //// TODO: Remove, this is a weird assert.
-  //for (ThreadData* td : the_threads) {
-  //  DR_ASSERT(td->event);
-  //}
-
-  dr_atomic_store32(&data->running, 1);
-  dr_atomic_add32_return_sum(&the_threads_running, 1);
+  //dr_printf("Hello from WrapNextRun! TID: %d\n", data->thread_idx);
 
   if (dr_atomic_add32_return_sum(&the_threads_waiting, 1) < ArrayCount(the_threads)) {
-    dr_printf("Thread %d waiting for other threads.\n", data->thread_idx);
     dr_event_wait(data->event);
     dr_event_reset(data->event);
   } else {
-    dr_printf("Thread %d came last to the waiting region.\n", data->thread_idx);
     if (data->thread_idx != 0) {
-      dr_printf("Thread %d waking TID=0 and putting itself to sleep.\n", data->thread_idx);
       dr_event_signal(the_threads[0]->event);
       dr_event_wait(data->event);
       dr_event_reset(data->event);
@@ -119,13 +107,15 @@ static bool WrapNextRun() {
 
   if (data->thread_idx == 0) {
     dr_atomic_store32(&the_threads_waiting, 0);
+    for (ThreadData* td : the_threads) {
+      DR_ASSERT(!dr_atomic_load32(&td->running));
+      dr_atomic_store32(&td->running, 1);
+    }
+    dr_atomic_store32(&the_threads_running, ArrayCount(the_threads));
 
-    // We are the first in this test run, we get to set the switch mask.
-    // RECONSIDER: This might be more natural to set in `ReportTestResult`.
     switch_mask = ++next_switch_mask;
     dr_printf("switch mask is now 0x%x, initially acquired by TID: %d\n", switch_mask, data->thread_idx);
     if (switch_mask >= 10) {
-      dr_printf("We are done, exiting.\n");
       dr_atomic_store32(&the_done, 1);
 
       for (ThreadData* other : the_threads) {
@@ -139,13 +129,12 @@ static bool WrapNextRun() {
 
   bool done = dr_atomic_load32(&the_done) != 0;
   if (done) {
-    dr_printf("Cleanup for thread %d\n", data->thread_idx);
+    // Cleanup this thread's resources.
     dr_event_destroy(data->event);
   }
 
-  dr_printf("poop %d\n", data->thread_idx);
   drwrap_replace_native_fini(drcontext);
-  return done;
+  return !done;
 }
 
 static void WrapReportTestResult(bool result) {
@@ -233,7 +222,6 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
                                              bool for_trace, bool translating, void* user_data) {
   instr_t* instr_fetch = drmgr_orig_app_instr_for_fetch(drcontext);
   if (!instr_fetch) return DR_EMIT_DEFAULT;
-  instrument_instr(drcontext, bb, where, instr_fetch);
 
   uintptr_t instr_addr = reinterpret_cast<uintptr_t>(instr_get_app_pc(instr_fetch));
   for (InstrumentedInstruction& instr : the_instrumented_instructions) {
@@ -287,7 +275,7 @@ static void event_module_load(void* drcontext, const module_data_t* info, bool l
     DR_ASSERT(instr.base == 0);
     instr.base = reinterpret_cast<uintptr_t>(info->start);
     instr.profiled_instruction_absolute = instr.base + instr.profiled_instruction_relative;
-    // printf("Initialized instr: %p\n", reinterpret_cast<void*>(instr.profiled_instruction_relative));
+    dr_printf("Initialized instr: %p -> %p\n", reinterpret_cast<void*>(instr.profiled_instruction_relative), reinterpret_cast<void*>(instr.profiled_instruction_absolute));
   }
 }
 
