@@ -13,6 +13,41 @@
 
 using namespace app;
 
+void PrintBinary(uint64_t n, uint64_t total_length) {
+  int num_bits = 0;
+  uint64_t temp = n;
+
+  while (temp > 0) {
+    num_bits++;
+    temp >>= 1;
+  }
+
+  int leading_zeros = total_length - num_bits;
+  if (leading_zeros < 0) leading_zeros = 0;
+
+  for (int i = 0; i < leading_zeros; i++) {
+    dr_printf("0");
+  }
+
+  if (n == 0 && total_length > 0) {
+    dr_printf("0");
+  } else {
+    for (int i = num_bits - 1; i >= 0; i--) {
+      dr_printf("%d", (n >> i) & 1);
+    }
+  }
+}
+
+// http://graphics.stanford.edu/~seander/bithacks.html
+static inline uint64_t first_perm(uint64_t n, uint64_t c) { return (1 << c) - 1; }
+static inline uint64_t last_perm(uint64_t n, uint64_t c) { return (1 << n) - (1 << (n - c)); }
+static inline uint64_t next_perm(uint64_t v) {
+  uint64_t t = (v | (v - 1)) + 1;
+  uint64_t w = t | ((((t & -t) / (v & -v)) >> 1) - 1);
+  return w;
+}
+static inline uint64_t perm_as_delta(uint64_t v) { return v ^ (v << 1); }
+
 struct ThreadData {
   bool initialized_instrumentation;
   int volatile running;
@@ -65,6 +100,9 @@ static void insert_set_is_instrumenting(void* drcontext, instrlist_t* ilist, ins
                           scratch);
 }
 
+static int total_runs;
+static int total_successes;
+
 // TODO: This currently assumes that we will have exactly 2 threads (not more OR less).
 static int volatile the_next_thread_idx;
 static ThreadData* the_threads[2];
@@ -74,8 +112,14 @@ static int volatile the_threads_waiting;
 static int volatile the_threads_running;
 static int volatile the_threads_successful;
 
-static uint64_t the_next_switch_mask = 0;
+static uint64_t the_first_perm =
+    first_perm(ArrayCount(the_instrumented_instructions) * 2, ArrayCount(the_instrumented_instructions));
+static uint64_t the_last_perm =
+    last_perm(ArrayCount(the_instrumented_instructions) * 2, ArrayCount(the_instrumented_instructions));
+static uint64_t the_current_perm = the_first_perm;
 static uint64_t the_switch_mask = 0;
+static uint64_t the_current_perm_log;
+static uint64_t the_switch_mask_log;
 
 static bool WrapNextRun() {
   void* drcontext = dr_get_current_drcontext();
@@ -93,7 +137,7 @@ static bool WrapNextRun() {
     data->initialized_instrumentation = true;
   }
 
-  //dr_printf("Hello from WrapNextRun! TID: %d\n", data->thread_idx);
+  // dr_printf("Hello from WrapNextRun! TID: %d\n", data->thread_idx);
 
   if (dr_atomic_add32_return_sum(&the_threads_waiting, 1) < ArrayCount(the_threads)) {
     dr_event_wait(data->event);
@@ -114,9 +158,12 @@ static bool WrapNextRun() {
     }
     dr_atomic_store32(&the_threads_running, ArrayCount(the_threads));
 
-    the_switch_mask = ++the_next_switch_mask;
-    //dr_printf("switch mask is now 0x%x, initially acquired by TID: %d\n", the_switch_mask, data->thread_idx);
-    if (the_switch_mask >= 100) {
+    if (the_current_perm <= the_last_perm) {
+      the_switch_mask = perm_as_delta(the_current_perm);
+      the_current_perm_log = the_current_perm;
+      the_switch_mask_log = the_switch_mask;
+      the_current_perm = next_perm(the_current_perm);
+    } else {
       dr_atomic_store32(&the_done, 1);
 
       for (ThreadData* other : the_threads) {
@@ -142,7 +189,7 @@ static void WrapReportTestResult(bool result) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  //dr_printf("Hello from WrapReportTestResult! %d TID: %d\n", result, data->thread_idx);
+  // dr_printf("Hello from WrapReportTestResult! %d TID: %d\n", result, data->thread_idx);
 
   if (result) {
     dr_atomic_add32_return_sum(&the_threads_successful, 1);
@@ -171,10 +218,18 @@ static void WrapReportTestResult(bool result) {
     // We will wait for the next test run in `WrapNextRun`.
   } else {
     int successes = dr_atomic_load32(&the_threads_successful);
-    if (successes < ArrayCount(the_threads)) {
-      dr_printf("!!! %d / %d threads FAILED for mask 0x%x\n", (ArrayCount(the_threads) - successes), ArrayCount(the_threads), the_next_switch_mask);
-    }
     dr_atomic_store32(&the_threads_successful, 0);
+    bool all_successful = (successes == ArrayCount(the_threads));
+    if (all_successful) ++total_successes;
+    ++total_runs;
+
+    const char* prefix = all_successful ? ":) :)": "!!!!!";
+    dr_printf("%s %d / %d threads FAILED for mask 0b", prefix, (ArrayCount(the_threads) - successes),
+              ArrayCount(the_threads));
+    PrintBinary(the_switch_mask_log, ArrayCount(the_instrumented_instructions) * 2);
+    dr_printf(" (0b");
+    PrintBinary(the_current_perm_log, ArrayCount(the_instrumented_instructions) * 2);
+    dr_printf(")\n");
   }
 
   drwrap_replace_native_fini(drcontext);
@@ -286,7 +341,8 @@ static void event_module_load(void* drcontext, const module_data_t* info, bool l
     DR_ASSERT(instr.base == 0);
     instr.base = reinterpret_cast<uintptr_t>(info->start);
     instr.profiled_instruction_absolute = instr.base + instr.profiled_instruction_relative;
-    dr_printf("Initialized instr: %p -> %p\n", reinterpret_cast<void*>(instr.profiled_instruction_relative), reinterpret_cast<void*>(instr.profiled_instruction_absolute));
+    dr_printf("Initialized instr: %p -> %p\n", reinterpret_cast<void*>(instr.profiled_instruction_relative),
+              reinterpret_cast<void*>(instr.profiled_instruction_absolute));
   }
 }
 
@@ -296,6 +352,8 @@ static void event_thread_exit(void* drcontext) {
 }
 
 static void event_exit(void) {
+  dr_printf("\n\nTOTAL SUCCESSES: %d / %d\n", total_successes, total_runs);
+
   dr_log(NULL, DR_LOG_ALL, 1, "Client 'runner' exit\n");
   if (!dr_raw_tls_cfree(tls_offs, TLS_OFFSET__COUNT)) DR_ASSERT(false);
 
