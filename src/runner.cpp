@@ -72,9 +72,10 @@ static ThreadData* the_threads[2];
 static int volatile the_done;
 static int volatile the_threads_waiting;
 static int volatile the_threads_running;
+static int volatile the_threads_successful;
 
-static uint64_t next_switch_mask = 0;
-static uint64_t switch_mask = 0;
+static uint64_t the_next_switch_mask = 0;
+static uint64_t the_switch_mask = 0;
 
 static bool WrapNextRun() {
   void* drcontext = dr_get_current_drcontext();
@@ -113,9 +114,9 @@ static bool WrapNextRun() {
     }
     dr_atomic_store32(&the_threads_running, ArrayCount(the_threads));
 
-    switch_mask = ++next_switch_mask;
-    dr_printf("switch mask is now 0x%x, initially acquired by TID: %d\n", switch_mask, data->thread_idx);
-    if (switch_mask >= 10) {
+    the_switch_mask = ++the_next_switch_mask;
+    //dr_printf("switch mask is now 0x%x, initially acquired by TID: %d\n", the_switch_mask, data->thread_idx);
+    if (the_switch_mask >= 100) {
       dr_atomic_store32(&the_done, 1);
 
       for (ThreadData* other : the_threads) {
@@ -141,7 +142,11 @@ static void WrapReportTestResult(bool result) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  dr_printf("Hello from WrapReportTestResult! %d TID: %d\n", result, data->thread_idx);
+  //dr_printf("Hello from WrapReportTestResult! %d TID: %d\n", result, data->thread_idx);
+
+  if (result) {
+    dr_atomic_add32_return_sum(&the_threads_successful, 1);
+  }
 
   int remaining = dr_atomic_add32_return_sum(&the_threads_running, -1);
   dr_atomic_store32(&data->running, 0);
@@ -164,6 +169,12 @@ static void WrapReportTestResult(bool result) {
     DR_ASSERT(woke_someone);
 
     // We will wait for the next test run in `WrapNextRun`.
+  } else {
+    int successes = dr_atomic_load32(&the_threads_successful);
+    if (successes < ArrayCount(the_threads)) {
+      dr_printf("!!! %d / %d threads FAILED for mask 0x%x\n", (ArrayCount(the_threads) - successes), ArrayCount(the_threads), the_next_switch_mask);
+    }
+    dr_atomic_store32(&the_threads_successful, 0);
   }
 
   drwrap_replace_native_fini(drcontext);
@@ -173,8 +184,8 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  bool should_switch = switch_mask & 1;
-  switch_mask >>= 1;
+  bool should_switch = the_switch_mask & 1;
+  the_switch_mask >>= 1;
 
   if (should_switch) {
     bool woke_someone = false;
