@@ -69,8 +69,9 @@ static void insert_set_is_instrumenting(void* drcontext, instrlist_t* ilist, ins
 static int volatile the_next_thread_idx;
 static ThreadData* the_threads[2];
 
-static int volatile the_last_run;
-static int volatile the_in_test_count;
+static int volatile the_done;
+static int volatile the_threads_waiting;
+static int volatile the_threads_running;
 
 static uint64_t next_switch_mask = 0;
 static uint64_t switch_mask = 0;
@@ -79,51 +80,72 @@ static bool WrapNextRun() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  dr_printf("Hello from WrapNextRun! TID: %d\n", data->thread_idx);
-
-  bool is_last_run = dr_atomic_load32(&the_last_run) != 0;
-
-  dr_atomic_store32(&data->running, 1);
-  bool first = dr_atomic_add32_return_sum(&the_in_test_count, 1) == 1;
-  if (first) {
-    // We are the first in this test run, we get to set the switch mask.
-    // RECONSIDER: This might be more natural to set in `ReportTestResult`.
-    switch_mask = ++next_switch_mask;
-    dr_printf("switch mask is now 0x%x, initially acquired by TID: %d\n", switch_mask, data->thread_idx);
-    if (switch_mask >= 10) {
-      dr_printf("This is the last run\n");
-      dr_atomic_store32(&the_last_run, 1);
-    }
-  }
-
   // Initialize the event on the first run.
   // We can't do this in `event_thread_init` because we don't know if a thread is a test thread or for example the main
   // application thread.
   if (!data->initialized_instrumentation) {
     data->event = dr_event_create();
     DR_ASSERT(data->event);
-
     data->thread_idx = dr_atomic_add32_return_sum(&the_next_thread_idx, 1) - 1;
     DR_ASSERT(data->thread_idx < ArrayCount(the_threads));
     the_threads[data->thread_idx] = data;
-
-    if (data->thread_idx + 1 < ArrayCount(the_threads)) {
-      dr_printf("Thread %d waiting\n", data->thread_idx);
-      dr_event_wait(data->event);
-      dr_event_reset(data->event);
-    }
-
     dr_printf("Thread %d done with initialization\n", data->thread_idx);
     data->initialized_instrumentation = true;
   }
 
-  // TODO: Remove, this is a weird assert.
-  for (ThreadData* td : the_threads) {
-    DR_ASSERT(td->event);
+  dr_printf("Hello from WrapNextRun! TID: %d\n", data->thread_idx);
+
+  //// TODO: Remove, this is a weird assert.
+  //for (ThreadData* td : the_threads) {
+  //  DR_ASSERT(td->event);
+  //}
+
+  dr_atomic_store32(&data->running, 1);
+  dr_atomic_add32_return_sum(&the_threads_running, 1);
+
+  if (dr_atomic_add32_return_sum(&the_threads_waiting, 1) < ArrayCount(the_threads)) {
+    dr_printf("Thread %d waiting for other threads.\n", data->thread_idx);
+    dr_event_wait(data->event);
+    dr_event_reset(data->event);
+  } else {
+    dr_printf("Thread %d came last to the waiting region.\n", data->thread_idx);
+    if (data->thread_idx != 0) {
+      dr_printf("Thread %d waking TID=0 and putting itself to sleep.\n", data->thread_idx);
+      dr_event_signal(the_threads[0]->event);
+      dr_event_wait(data->event);
+      dr_event_reset(data->event);
+    }
   }
 
+  if (data->thread_idx == 0) {
+    dr_atomic_store32(&the_threads_waiting, 0);
+
+    // We are the first in this test run, we get to set the switch mask.
+    // RECONSIDER: This might be more natural to set in `ReportTestResult`.
+    switch_mask = ++next_switch_mask;
+    dr_printf("switch mask is now 0x%x, initially acquired by TID: %d\n", switch_mask, data->thread_idx);
+    if (switch_mask >= 10) {
+      dr_printf("We are done, exiting.\n");
+      dr_atomic_store32(&the_done, 1);
+
+      for (ThreadData* other : the_threads) {
+        if (other == data) continue;
+        DR_ASSERT(other);
+        DR_ASSERT(dr_atomic_load32(&other->running));
+        dr_event_signal(other->event);
+      }
+    }
+  }
+
+  bool done = dr_atomic_load32(&the_done) != 0;
+  if (done) {
+    dr_printf("Cleanup for thread %d\n", data->thread_idx);
+    dr_event_destroy(data->event);
+  }
+
+  dr_printf("poop %d\n", data->thread_idx);
   drwrap_replace_native_fini(drcontext);
-  return !is_last_run;
+  return done;
 }
 
 static void WrapReportTestResult(bool result) {
@@ -132,13 +154,13 @@ static void WrapReportTestResult(bool result) {
 
   dr_printf("Hello from WrapReportTestResult! %d TID: %d\n", result, data->thread_idx);
 
-  int remaining = dr_atomic_add32_return_sum(&the_in_test_count, -1);
+  int remaining = dr_atomic_add32_return_sum(&the_threads_running, -1);
   dr_atomic_store32(&data->running, 0);
   DR_ASSERT(remaining >= 0);
 
   if (remaining > 0) {
     // There are still other threads running, so wake someone else.
-    bool awoken_someone = false;
+    bool woke_someone = false;
     for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
       uint64_t next_thread_idx = (data->thread_idx + i) % ArrayCount(the_threads);
       ThreadData* other = the_threads[next_thread_idx];
@@ -146,27 +168,13 @@ static void WrapReportTestResult(bool result) {
       DR_ASSERT(other != data);
       if (dr_atomic_load32(&other->running)) {
         dr_event_signal(other->event);
-        awoken_someone = true;
+        woke_someone = true;
         break;
       }
     }
-    DR_ASSERT(awoken_someone);
+    DR_ASSERT(woke_someone);
 
-    // Wait for our turn.
-    dr_event_wait(data->event);
-    dr_event_reset(data->event);
-  } else {
-    // We are the last thread in this test run. Everyone else is sleeping, wake them all up.
-    // RECONSIDER: This might be more natural to do in `WrapNextRun`.
-    for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
-      uint64_t next_thread_idx = (data->thread_idx + i) % ArrayCount(the_threads);
-      ThreadData* other = the_threads[next_thread_idx];
-      DR_ASSERT(other);
-      DR_ASSERT(other != data);
-      DR_ASSERT(!dr_atomic_load32(&other->running));
-      dr_event_signal(other->event);
-      break;
-    }
+    // We will wait for the next test run in `WrapNextRun`.
   }
 
   drwrap_replace_native_fini(drcontext);
@@ -180,6 +188,7 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
   switch_mask >>= 1;
 
   if (should_switch) {
+    bool woke_someone = false;
     for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
       uint64_t next_thread_idx = (data->thread_idx + i) % ArrayCount(the_threads);
       ThreadData* other = the_threads[next_thread_idx];
@@ -189,9 +198,12 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
         dr_event_signal(other->event);
         dr_event_wait(data->event);
         dr_event_reset(data->event);
+        woke_someone = true;
         break;
       }
     }
+    // RECONSIDER: Add this assert back when we do actual scheduling.
+    // DR_ASSERT(woke_someone);
   }
 }
 
