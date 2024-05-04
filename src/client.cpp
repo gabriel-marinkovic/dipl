@@ -67,6 +67,7 @@ struct MemoryReference {
 #define MEM_BUF_SIZE (sizeof(MemoryReference) * MAX_NUM_MEM_REFS)
 
 struct ThreadData {
+  int thread_idx;
   bool entered_instrumentation;
   uint8_t* seg_base;
   MemoryReference* buf_base;
@@ -80,6 +81,8 @@ static uint64_t the_total_memory_reference_count;
 
 static void* the_module_mutex;
 static BufferedFileWriter the_module_writer;
+
+static int volatile the_next_thread_idx;
 
 /* Allocated TLS slot offsets */
 enum TlsOffset {
@@ -326,6 +329,7 @@ static void event_thread_init(void* drcontext) {
   /* Keep seg_base in a per-thread data structure so we can get the TLS
    * slot and find where the pointer points to in the buffer.
    */
+  data->thread_idx = dr_atomic_add32_return_sum(&the_next_thread_idx, 1) - 1;
   data->seg_base = (uint8_t*)dr_get_dr_segment_base(tls_seg);
   data->buf_base = (MemoryReference*)dr_raw_mem_alloc(MEM_BUF_SIZE, DR_MEMPROT_READ | DR_MEMPROT_WRITE, NULL);
   DR_ASSERT(data->seg_base != NULL && data->buf_base != NULL);
@@ -415,6 +419,14 @@ static void WrapReportTestResult(bool result) {
   drwrap_replace_native_fini(drcontext);
 }
 
+static bool WrapInitializing() {
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+  drwrap_replace_native_fini(drcontext);
+  return data->thread_idx == 0;
+}
+
+
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   /* We need 2 reg slots beyond drreg's eflags slots => 3 slots */
   drreg_options_t ops = {sizeof(ops), 3, false};
@@ -441,26 +453,20 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   module_data_t* main_module = dr_get_main_module();
   DR_ASSERT(main_module);
 
-  size_t next_run_offset = 0;
-  size_t report_test_result_offset = 0;
-  drsym_error_t status;
-  status = drsym_lookup_symbol(main_module->full_path, "NextRun", &next_run_offset, DRSYM_DEFAULT_FLAGS);
-  DR_ASSERT(status == DRSYM_SUCCESS);
-  status =
-      drsym_lookup_symbol(main_module->full_path, "ReportTestResult", &report_test_result_offset, DRSYM_DEFAULT_FLAGS);
-  DR_ASSERT(status == DRSYM_SUCCESS);
+  auto replace_native = [&main_module](const char* name, auto* replace_with) {
+    size_t offset = 0;
+    drsym_error_t status = drsym_lookup_symbol(main_module->full_path, name, &offset, DRSYM_DEFAULT_FLAGS);
+    DR_ASSERT(status == DRSYM_SUCCESS);
 
-  uintptr_t next_run_addr = reinterpret_cast<uintptr_t>(main_module->start) + next_run_offset;
-  uintptr_t report_test_result_addr = reinterpret_cast<uintptr_t>(main_module->start) + report_test_result_offset;
+    uintptr_t addr = reinterpret_cast<uintptr_t>(main_module->start) + offset;
+    bool ok =
+        drwrap_replace_native(reinterpret_cast<app_pc>(addr),
+                              reinterpret_cast<app_pc>(reinterpret_cast<void*>(replace_with)), true, 0, NULL, false);
+  };
 
-  bool ok;
-  ok = drwrap_replace_native(reinterpret_cast<app_pc>(next_run_addr),
-                             reinterpret_cast<app_pc>(reinterpret_cast<void*>(WrapNextRun)), true, 0, NULL, false);
-  DR_ASSERT(ok);
-  ok = drwrap_replace_native(reinterpret_cast<app_pc>(report_test_result_addr),
-                             reinterpret_cast<app_pc>(reinterpret_cast<void*>(WrapReportTestResult)), true, 0, NULL,
-                             false);
-  DR_ASSERT(ok);
+  replace_native("NextRun", WrapNextRun);
+  replace_native("ReportTestResult", WrapReportTestResult);
+  replace_native("Initializing", WrapInitializing);
 
   dr_free_module_data(main_module);
 
