@@ -223,7 +223,7 @@ static void WrapReportTestResult(bool result) {
     if (all_successful) ++total_successes;
     ++total_runs;
 
-    const char* prefix = all_successful ? ":) :)": "!!!!!";
+    const char* prefix = all_successful ? ":) :)" : "!!!!!";
     dr_printf("%s %d / %d threads FAILED for mask 0b", prefix, (ArrayCount(the_threads) - successes),
               ArrayCount(the_threads));
     PrintBinary(the_switch_mask_log, ArrayCount(the_instrumented_instructions) * 2);
@@ -233,6 +233,13 @@ static void WrapReportTestResult(bool result) {
   }
 
   drwrap_replace_native_fini(drcontext);
+}
+
+static bool WrapInitializing() {
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+  drwrap_replace_native_fini(drcontext);
+  return data->thread_idx == 0;
 }
 
 static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
@@ -393,26 +400,20 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   module_data_t* main_module = dr_get_main_module();
   DR_ASSERT(main_module);
 
-  size_t next_run_offset = 0;
-  size_t report_test_result_offset = 0;
-  drsym_error_t status;
-  status = drsym_lookup_symbol(main_module->full_path, "NextRun", &next_run_offset, DRSYM_DEFAULT_FLAGS);
-  DR_ASSERT(status == DRSYM_SUCCESS);
-  status =
-      drsym_lookup_symbol(main_module->full_path, "ReportTestResult", &report_test_result_offset, DRSYM_DEFAULT_FLAGS);
-  DR_ASSERT(status == DRSYM_SUCCESS);
+  auto replace_native = [&main_module](const char* name, auto* replace_with) {
+    size_t offset = 0;
+    drsym_error_t status = drsym_lookup_symbol(main_module->full_path, name, &offset, DRSYM_DEFAULT_FLAGS);
+    DR_ASSERT(status == DRSYM_SUCCESS);
 
-  uintptr_t next_run_addr = reinterpret_cast<uintptr_t>(main_module->start) + next_run_offset;
-  uintptr_t report_test_result_addr = reinterpret_cast<uintptr_t>(main_module->start) + report_test_result_offset;
+    uintptr_t addr = reinterpret_cast<uintptr_t>(main_module->start) + offset;
+    bool ok =
+        drwrap_replace_native(reinterpret_cast<app_pc>(addr),
+                              reinterpret_cast<app_pc>(reinterpret_cast<void*>(replace_with)), true, 0, NULL, false);
+  };
 
-  bool ok;
-  ok = drwrap_replace_native(reinterpret_cast<app_pc>(next_run_addr),
-                             reinterpret_cast<app_pc>(reinterpret_cast<void*>(WrapNextRun)), true, 0, NULL, false);
-  DR_ASSERT(ok);
-  ok = drwrap_replace_native(reinterpret_cast<app_pc>(report_test_result_addr),
-                             reinterpret_cast<app_pc>(reinterpret_cast<void*>(WrapReportTestResult)), true, 0, NULL,
-                             false);
-  DR_ASSERT(ok);
+  replace_native("NextRun", WrapNextRun);
+  replace_native("ReportTestResult", WrapReportTestResult);
+  replace_native("Initializing", WrapInitializing);
 
   dr_free_module_data(main_module);
 
