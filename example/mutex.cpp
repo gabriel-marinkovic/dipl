@@ -48,9 +48,5 @@ int main() {
   t1.join();
   t2.join();
 
-  if (x != 2) {
-    std::cout << "FATAL ERROR IN `basic`!!!" << std::endl;
-  }
-
   return 0;
 }

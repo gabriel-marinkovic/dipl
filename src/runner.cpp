@@ -52,7 +52,7 @@ struct ThreadData {
   bool initialized_instrumentation;
   int volatile running;
   thread_id_t thread_id;
-  uint64_t thread_idx;
+  int64_t thread_idx;
   void* event;
   uint8_t* seg_base;
 };
@@ -148,6 +148,7 @@ static bool WrapNextRun() {
       DR_ASSERT(!dr_atomic_load32(&td->running));
       dr_atomic_store32(&td->running, 1);
     }
+    DR_ASSERT(data->event);
     dr_atomic_store32(&the_threads_running, ArrayCount(the_threads));
 
     if (the_current_perm <= the_last_perm) {
@@ -171,6 +172,7 @@ static bool WrapNextRun() {
   if (done) {
     // Cleanup this thread's resources.
     dr_event_destroy(data->event);
+    data->event = NULL;
   }
 
   drwrap_replace_native_fini(drcontext);
@@ -237,9 +239,14 @@ static bool WrapInitializing() {
 static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+  if (data->thread_idx < 0) return;
+  int running = dr_atomic_load32(&the_threads_running);
+  if (running == 0) return;
 
   bool should_switch = the_switch_mask & 1;
   the_switch_mask >>= 1;
+
+  dr_printf("%p In context switch point: %d\n", instr_addr_relative, data->thread_idx);
 
   if (should_switch) {
     bool woke_someone = false;
@@ -249,16 +256,21 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
       DR_ASSERT(other);
       DR_ASSERT(other != data);
       if (dr_atomic_load32(&other->running)) {
+        dr_printf("sleeping in context switch point: %d (%d)\n", data->thread_idx, data->thread_id);
+        DR_ASSERT(data->event);
         dr_event_signal(other->event);
         dr_event_wait(data->event);
         dr_event_reset(data->event);
         woke_someone = true;
+        dr_printf("WAKING in context switch point: %d\n", data->thread_idx);
         break;
       }
     }
     // RECONSIDER: Add this assert back when we do actual scheduling.
     // DR_ASSERT(woke_someone);
   }
+
+  dr_printf("LEAVING context switch point: %d\n", data->thread_idx);
 }
 
 static void instrument_instr(void* drcontext, instrlist_t* ilist, instr_t* where, instr_t* instr) {
@@ -325,6 +337,7 @@ static void event_thread_init(void* drcontext) {
   memset(data, 0, sizeof(*data));
   drmgr_set_tls_field(drcontext, the_tls_idx, data);
 
+  data->thread_idx = -1;
   data->thread_id = dr_get_thread_id(drcontext);
   data->seg_base = (uint8_t*)dr_get_dr_segment_base(tls_seg);
   DR_ASSERT(data->seg_base);
