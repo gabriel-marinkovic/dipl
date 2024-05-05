@@ -1,8 +1,9 @@
 import collections
+import dataclasses
+import os
+import shutil
 import struct
 import subprocess
-import os
-import dataclasses
 from typing import Dict, FrozenSet, List, Set, Tuple
 
 
@@ -27,6 +28,13 @@ def read_packed_string(file):
     size_bytes = file.read(struct.calcsize(size_format))
     size, = struct.unpack(size_format, size_bytes)
     return file.read(size).decode("utf-8")
+
+def write_packed_int64(file, x):
+    file.write(struct.pack("<Q", x))
+
+def write_packed_string(file, s):
+    write_packed_int64(file, len(s))
+    file.write(s.encode("utf-8"))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -91,12 +99,26 @@ class Module:
     size: int
     entry_point: int
 
+
+@dataclasses.dataclass(frozen=True)
+class InstructionToInstrument:
+    module: Module
+    name: str
+    offset: int
+    addr2line_output: str
+
+    def runtime_address(self) -> int:
+        return self.module.base + self.offset
+    def preferred_address(self) -> int:
+        return self.module.preferred_base + self.offset
+
+
 def parse_modules(directory) -> Tuple[Module]:
     modules = {}
     for filename in os.listdir(directory):
         if not filename.endswith(".module"):
             continue
-        file_path = os.path.join(directory_path, filename)
+        file_path = os.path.join(directory, filename)
 
         record_format = "<BQQQQ"
         record_size = struct.calcsize(record_format)
@@ -121,7 +143,6 @@ def parse_modules(directory) -> Tuple[Module]:
                 else:
                     modules.pop(module.base, None)
     return tuple(modules.values())
-
 
 
 def process_file(
@@ -150,15 +171,12 @@ def process_file(
     with open(file_path, "rb") as file:
         instr = None
         while True:
-            print(file.tell())
             record_bytes = file.read(record_size)
             if not record_bytes:
                 break
 
             opcode, size, addr = struct.unpack(record_format, record_bytes)
             opcode_name = read_packed_string(file)
-
-            print(opcode, opcode_name, size, fa(addr))
 
             is_instruction = (opcode != 0 and opcode != 1)
             if is_instruction:
@@ -181,92 +199,100 @@ def process_file(
                     instr.dst_ops.append(op)
         push_instr(instr)
 
-directory_path = "build/src"
+def get_instructions_to_instrument(collect_directory: str) -> List[InstructionToInstrument]:
+    modules = parse_modules(collect_directory)
 
-modules = parse_modules(directory_path)
-
-thread_idxs_from_instr: Dict[Instruction, Set[Tuple[int, bool]]] = collections.defaultdict(set)
-thread_accesses: Set[ThreadAccess] = set()
-for thread_idx, filename in enumerate(os.listdir(directory_path)):
-    if not filename.endswith(".bin"):
-        continue
-    file_path = os.path.join(directory_path, filename)
-    file_size = os.path.getsize(file_path)
-    if file_size > 1024**2:
-        print("skipping", filename, "cause too large:", file_size / 1024**2, "MB")
-        continue
-    process_file(thread_idxs_from_instr, thread_accesses, thread_idx, file_path)
-
-print(len(thread_idxs_from_instr))
-print(len(thread_accesses))
-
-shared_memory = set()
-for a1 in thread_accesses:
-    for a2 in thread_accesses:
-        if a1.thread_idx == a2.thread_idx:
+    thread_idxs_from_instr: Dict[Instruction, Set[Tuple[int, bool]]] = collections.defaultdict(set)
+    thread_accesses: Set[ThreadAccess] = set()
+    for thread_idx, filename in enumerate(os.listdir(collect_directory)):
+        if not filename.endswith(".bin"):
             continue
-        mem_intersection = (a1.write_addrs & a2.read_addrs) | (a1.read_addrs & a2.write_addrs)
-        shared_memory.update(mem_intersection)
-print(shared_memory)
-truly_shared_instruction_addresses = set()
-for instr in thread_idxs_from_instr.keys():
-    if instr.addresses_touched & shared_memory:
-        truly_shared_instruction_addresses.add((instr.address, instr.name))
-
-print(len(truly_shared_instruction_addresses))
-print("----------------------------------------")
-
-for module in modules:
-    print(module.preferred_name, module.base)
-print("----------------------------------------")
-
-
-@dataclasses.dataclass(frozen=True)
-class InstructionToInstrument:
-    module: Module
-    name: str
-    offset: int
-    addr2line_output: str
-
-    def runtime_address(self) -> int:
-        return self.module.base + self.offset
-    def preferred_address(self) -> int:
-        return self.module.preferred_base + self.offset
-
-
-instrumented = []
-for addr, name in sorted(truly_shared_instruction_addresses):
-    min_addr = float("inf")
-    min_idx = -1
-    for i in range(len(modules)):
-        offset = addr - modules[i].base
-        if offset < 0:
+        file_path = os.path.join(collect_directory, filename)
+        file_size = os.path.getsize(file_path)
+        if file_size > 1024**2:
+            print("skipping", filename, "cause too large:", file_size / 1024**2, "MB")
             continue
-        if min_addr > offset:
-            min_addr = offset
-            min_idx = i
+        process_file(thread_idxs_from_instr, thread_accesses, thread_idx, file_path)
 
-    module = modules[min_idx]
-    offset = addr - module.base
-    preferred_address = module.preferred_base + offset
+    shared_memory = set()
+    for a1 in thread_accesses:
+        for a2 in thread_accesses:
+            if a1.thread_idx == a2.thread_idx:
+                continue
+            mem_intersection = (a1.write_addrs & a2.read_addrs) | (a1.read_addrs & a2.write_addrs)
+            shared_memory.update(mem_intersection)
+    truly_shared_instruction_addresses = set()
+    for instr in thread_idxs_from_instr.keys():
+        if instr.addresses_touched & shared_memory:
+            truly_shared_instruction_addresses.add((instr.address, instr.name))
 
-    out, err = run_command(
-        "addr2line", "-Cafipe", module.path, f"0x{preferred_address:x}",
-        silent=True, silent_errors=True
-    )
-    addr2line = (out + err).strip()
-    instrumented.append(InstructionToInstrument(module=module, name=name, offset=offset, addr2line_output=addr2line))
+    instrumented = []
+    for addr, name in sorted(truly_shared_instruction_addresses):
+        min_addr = float("inf")
+        min_idx = -1
+        for i in range(len(modules)):
+            offset = addr - modules[i].base
+            if offset < 0:
+                continue
+            if min_addr > offset:
+                min_addr = offset
+                min_idx = i
 
-    print("{: <64}{: <12}0x{:x}".format(module.path, name, offset))
+        module = modules[min_idx]
+        offset = addr - module.base
+        preferred_address = module.preferred_base + offset
 
-print("----------------------------------------")
+        out, err = run_command(
+            "addr2line", "-Cafipe", module.path, f"0x{preferred_address:x}",
+            silent=True, silent_errors=True,
+        )
+        addr2line = (out + err).strip()
+        instrumented.append(InstructionToInstrument(module=module, name=name, offset=offset, addr2line_output=addr2line))
 
-instrumented_trimmed = []
-for instr in instrumented:
-    print(instr.addr2line_output)
+        print("{: <64}{: <12}0x{:x}".format(module.path, name, offset))
 
-print(len(instrumented_trimmed))
+    return instrumented
 
-print("TO COPY-PASTE:")
-for instr in instrumented:
-    print(f"0x{instr.offset:x}")
+
+DYNAMORIO_DIR = "DynamoRIO"
+DYNAMORIO_CLIENTS_DIR = "build/src"
+COLLECT_DIR = "collect"
+APP_UNDER_TEST = "build/example/mutex"
+
+print("Deleting", COLLECT_DIR, "...")
+shutil.rmtree(COLLECT_DIR, ignore_errors=True)
+os.makedirs(COLLECT_DIR)
+
+print("Collecting...")
+run_command(
+    os.path.join(DYNAMORIO_DIR, "bin64/drrun"),
+    "-c", os.path.join(DYNAMORIO_CLIENTS_DIR, "libclient.so"),
+    "--", APP_UNDER_TEST,
+    silent_errors=True,
+)
+
+print("Determining instructions...")
+instrumented = get_instructions_to_instrument(COLLECT_DIR)
+
+INSTRUCTIONS_PATH = os.path.join(COLLECT_DIR, "instructions.bin")
+print("Creating", INSTRUCTIONS_PATH, "...")
+with open(INSTRUCTIONS_PATH, "wb") as f:
+    write_packed_int64(f, len(instrumented))
+    for instr in instrumented:
+        write_packed_string(f, instr.module.path)
+        write_packed_int64(f, instr.offset)
+
+print("Running tests...")
+#run_command(
+#    os.path.join(DYNAMORIO_DIR, "bin64/drrun"),
+#    "-c", os.path.join(DYNAMORIO_CLIENTS_DIR, "librunner.so"), "-instructions_file", INSTRUCTIONS_PATH,
+#    "--", APP_UNDER_TEST,
+#    silent_errors=True,
+#)
+subprocess.run([
+    os.path.join(DYNAMORIO_DIR, "bin64/drrun"),
+    "-c", os.path.join(DYNAMORIO_CLIENTS_DIR, "librunner.so"), "-instructions_file", INSTRUCTIONS_PATH,
+    "--", APP_UNDER_TEST,
+])
+
+print("All done!")

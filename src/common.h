@@ -349,6 +349,6 @@ struct BufferedFileReader {
   bool ReadString(void* drcontext, String* string);
 };
 
-file_t OpenUniqueFile(void* drcontext, client_id_t id, String nameBase, String extension, bool read, bool write);
+file_t OpenUniqueFile(String directory, String nameBase, String extension, bool read, bool write);
 
 }  // namespace app

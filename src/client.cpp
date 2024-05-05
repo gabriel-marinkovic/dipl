@@ -339,7 +339,7 @@ static void event_thread_init(void* drcontext) {
 
   data->num_refs = 0;
 
-  file_t file = OpenUniqueFile(drcontext, the_client_id, Wrap("test"), Wrap("bin"), false, true);
+  file_t file = OpenUniqueFile(Wrap("./collect"), Wrap("test"), Wrap("bin"), false, true);
   BufferedFileWriter::Make(&data->writer, drcontext, file, 64 * 1024 * 1024);
 }
 
@@ -447,7 +447,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   the_mutex = dr_mutex_create();
   the_module_mutex = dr_mutex_create();
 
-  file_t module_file = OpenUniqueFile(nullptr, the_client_id, Wrap("module"), Wrap("module"), false, true);
+  file_t module_file = OpenUniqueFile(Wrap("./collect"), Wrap("module"), Wrap("module"), false, true);
   BufferedFileWriter::Make(&the_module_writer, nullptr, module_file, 1024);
 
   module_data_t* main_module = dr_get_main_module();

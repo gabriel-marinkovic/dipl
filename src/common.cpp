@@ -434,16 +434,11 @@ void ConsumeWhitespace(String* string);
 // Filesystem
 ///////////////////////////////////////////////////////////////////////////////
 
-file_t OpenUniqueFile(void* drcontext, client_id_t id, String nameBase, String extension, bool read, bool write) {
-  String clientPath = Wrap(dr_get_client_path(id));
-  String clientDir = ConsumeUntilLast(&clientPath, '/');
-  String dir = Allocate(drcontext, clientDir);
-  Defer(DrThreadFreeArray(drcontext, &dir));
-
+file_t OpenUniqueFile(String directory, String nameBase, String extension, bool read, bool write) {
   uint64_t flags = DR_FILE_ALLOW_LARGE;
   if (read) flags |= DR_FILE_READ;
 
-  file_t file = drx_open_unique_appid_file(reinterpret_cast<char*>(dir.address), dr_get_process_id(),
+  file_t file = drx_open_unique_appid_file(reinterpret_cast<char*>(directory.address), dr_get_process_id(),
                                            reinterpret_cast<char*>(nameBase.address),
                                            reinterpret_cast<char*>(extension.address), flags, NULL, 0);
   DR_ASSERT(file != INVALID_FILE);
