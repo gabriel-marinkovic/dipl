@@ -543,4 +543,15 @@ bool BufferedFileReader::Read(Array<uint8_t> const& data) {
   return true;
 }
 
+bool BufferedFileReader::ReadString(void* drcontext, String* string) {
+  *string = {};
+  if (!ReadUint64LE(&string->count)) return false;
+
+  Array<uint8_t> buffer = DrThreadAllocArray<uint8_t>(drcontext, string->count);
+  if (!Read(buffer)) return false;
+
+  string->address = reinterpret_cast<unsigned char*>(buffer.address);
+  return true;
+}
+
 }  // namespace app

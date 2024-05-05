@@ -346,7 +346,7 @@ struct BufferedFileReader {
     return Read(AsBytes(value));
   }
 
-  bool ReadString(String* string);
+  bool ReadString(void* drcontext, String* string);
 };
 
 file_t OpenUniqueFile(void* drcontext, client_id_t id, String nameBase, String extension, bool read, bool write);

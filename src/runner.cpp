@@ -62,18 +62,12 @@ static client_id_t the_client_id;
 
 struct InstrumentedInstruction {
   String path;
-  uintptr_t profiled_instruction_relative;
-  uintptr_t base;
-  uintptr_t profiled_instruction_absolute;
+  uintptr_t adddr_relative;
+  uintptr_t module_base;
+  uintptr_t addr_absolute;
 };
 
-static InstrumentedInstruction the_instrumented_instructions[] = {
-    {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1230, 0, 0},
-    {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1238, 0, 0},
-    {Wrap("/home/gabriel/dipl/build/example/basic"), 0x123e, 0, 0},
-    {Wrap("/home/gabriel/dipl/build/example/basic"), 0x1246, 0, 0},
-    {Wrap("/home/gabriel/dipl/build/example/basic"), 0x124c, 0, 0},
-};
+static Array<InstrumentedInstruction> the_instrumented_instrs;
 
 /* Allocated TLS slot offsets */
 enum TlsOffset {
@@ -112,11 +106,9 @@ static int volatile the_threads_waiting;
 static int volatile the_threads_running;
 static int volatile the_threads_successful;
 
-static uint64_t the_first_perm =
-    first_perm(ArrayCount(the_instrumented_instructions) * 2, ArrayCount(the_instrumented_instructions));
-static uint64_t the_last_perm =
-    last_perm(ArrayCount(the_instrumented_instructions) * 2, ArrayCount(the_instrumented_instructions));
-static uint64_t the_current_perm = the_first_perm;
+static uint64_t the_first_perm;
+static uint64_t the_last_perm;
+static uint64_t the_current_perm;
 static uint64_t the_switch_mask = 0;
 static uint64_t the_current_perm_log;
 static uint64_t the_switch_mask_log;
@@ -226,9 +218,9 @@ static void WrapReportTestResult(bool result) {
     const char* prefix = all_successful ? ":) :)" : "!!!!!";
     dr_printf("%s %d / %d threads FAILED for mask 0b", prefix, (ArrayCount(the_threads) - successes),
               ArrayCount(the_threads));
-    PrintBinary(the_switch_mask_log, ArrayCount(the_instrumented_instructions) * 2);
+    PrintBinary(the_switch_mask_log, the_instrumented_instrs.count * 2);
     dr_printf(" (0b");
-    PrintBinary(the_current_perm_log, ArrayCount(the_instrumented_instructions) * 2);
+    PrintBinary(the_current_perm_log, the_instrumented_instrs.count * 2);
     dr_printf(")\n");
   }
 
@@ -297,13 +289,13 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
   if (!instr_fetch) return DR_EMIT_DEFAULT;
 
   uintptr_t instr_addr = reinterpret_cast<uintptr_t>(instr_get_app_pc(instr_fetch));
-  for (InstrumentedInstruction& instr : the_instrumented_instructions) {
-    if (!instr.profiled_instruction_absolute) continue;
-    if (instr.profiled_instruction_absolute != instr_addr) continue;
+  for (InstrumentedInstruction& instr : the_instrumented_instrs) {
+    if (!instr.addr_absolute) continue;
+    if (instr.addr_absolute != instr_addr) continue;
 
     // RECONSIDER: save fp state?
     dr_insert_clean_call(drcontext, bb, where, (void*)ContextSwitchPoint, true, 1,
-                         OPND_CREATE_INTPTR(instr.profiled_instruction_relative));
+                         OPND_CREATE_INTPTR(instr.adddr_relative));
     break;
   }
 
@@ -343,13 +335,13 @@ static void event_module_load(void* drcontext, const module_data_t* info, bool l
   dr_mutex_lock(the_mutex);
   Defer(dr_mutex_unlock(the_mutex));
 
-  for (InstrumentedInstruction& instr : the_instrumented_instructions) {
+  for (InstrumentedInstruction& instr : the_instrumented_instrs) {
     if (instr.path != Wrap(info->full_path)) continue;
-    DR_ASSERT(instr.base == 0);
-    instr.base = reinterpret_cast<uintptr_t>(info->start);
-    instr.profiled_instruction_absolute = instr.base + instr.profiled_instruction_relative;
-    dr_printf("Initialized instr: %p -> %p\n", reinterpret_cast<void*>(instr.profiled_instruction_relative),
-              reinterpret_cast<void*>(instr.profiled_instruction_absolute));
+    DR_ASSERT(instr.module_base == 0);
+    instr.module_base = reinterpret_cast<uintptr_t>(info->start);
+    instr.addr_absolute = instr.module_base + instr.adddr_relative;
+    dr_printf("Initialized instr: %p -> %p\n", reinterpret_cast<void*>(instr.adddr_relative),
+              reinterpret_cast<void*>(instr.addr_absolute));
   }
 }
 
@@ -360,6 +352,11 @@ static void event_thread_exit(void* drcontext) {
 
 static void event_exit(void) {
   dr_printf("\n\nTOTAL SUCCESSES: %d / %d\n", total_successes, total_runs);
+
+  for (auto& instr : the_instrumented_instrs) {
+    DrThreadFreeArray(NULL, &instr.path);
+  }
+  DrThreadFreeArray(NULL, &the_instrumented_instrs);
 
   dr_log(NULL, DR_LOG_ALL, 1, "Client 'runner' exit\n");
   if (!dr_raw_tls_cfree(tls_offs, TLS_OFFSET__COUNT)) DR_ASSERT(false);
@@ -386,6 +383,56 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   if (!drmgr_init() || drreg_init(&ops) != DRREG_SUCCESS || !drutil_init() || !drwrap_init() || !drx_init() ||
       drsym_init(0) != DRSYM_SUCCESS)
     DR_ASSERT(false);
+
+  // Initialize `the_instrumented_instrs` from path given in `argv`.
+  {
+    if (argc != 3) {
+      dr_fprintf(STDERR, "Error: Client must be invoked with a single CLI parameter `-instructions_file`\n");
+      dr_abort();
+    }
+    if (strcmp(argv[1], "-instructions_file") != 0) {
+      dr_fprintf(STDERR, "Error: Client must be invoked with a single CLI parameter `-instructions_file`\n");
+      dr_abort();
+    }
+
+    const char* instr_path = argv[2];
+    file_t instr_file = dr_open_file(instr_path, DR_FILE_READ);
+    DR_ASSERT(instr_file != INVALID_FILE);
+
+    BufferedFileReader instr_reader;
+    BufferedFileReader::Make(&instr_reader, NULL, instr_file, 1024);
+
+    uint64_t instr_count = 0;
+    bool ok = instr_reader.ReadUint64LE(&instr_count);
+    DR_ASSERT(ok);
+    if (instr_count == 0) {
+      dr_fprintf(STDERR, "Error: no instructions provided in '%s'\n", instr_path);
+      dr_abort();
+    } else if (instr_count >= 32) {
+      dr_fprintf(STDERR, "Error: too many instructions (%llu) provided in '%s'\n", instr_count, instr_path);
+      dr_abort();
+    }
+
+    the_instrumented_instrs = DrThreadAllocArray<InstrumentedInstruction>(NULL, instr_count);
+    for (uint64_t i = 0; i < instr_count; ++i) {
+      ok = instr_reader.ReadString(NULL, &the_instrumented_instrs[i].path);
+      DR_ASSERT(ok);
+      ok = instr_reader.ReadUint64LE(&the_instrumented_instrs[i].adddr_relative);
+      DR_ASSERT(ok);
+
+      dr_printf("Parsed instr %.*s, %d\n", StringArgs(the_instrumented_instrs[i].path),
+                the_instrumented_instrs[i].adddr_relative);
+    }
+
+    instr_reader.Destroy();
+  }
+
+  // Initialize global permutation state.
+  {
+    the_first_perm = first_perm(the_instrumented_instrs.count * 2, the_instrumented_instrs.count);
+    the_last_perm = last_perm(the_instrumented_instrs.count * 2, the_instrumented_instrs.count);
+    the_current_perm = the_first_perm;
+  }
 
   dr_register_exit_event(event_exit);
   if (!drmgr_register_thread_init_event(event_thread_init) || !drmgr_register_thread_exit_event(event_thread_exit) ||
