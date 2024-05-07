@@ -264,7 +264,7 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
   instr_t* instr_fetch = drmgr_orig_app_instr_for_fetch(drcontext);
   if (instr_fetch) {
     DR_ASSERT(instr_is_app(instr_fetch));
-    if (instr_reads_memory(instr_fetch) || instr_writes_memory(instr_fetch)) {
+    if (instr_reads_memory(instr_fetch) || instr_writes_memory(instr_fetch) || instr_is_syscall(instr_fetch)) {
       instrument_instr(drcontext, bb, where, instr_fetch);
     }
   }

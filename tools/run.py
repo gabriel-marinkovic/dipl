@@ -29,6 +29,9 @@ def read_packed_string(file):
     size, = struct.unpack(size_format, size_bytes)
     return file.read(size).decode("utf-8")
 
+def write_packed_bool8(file, x):
+    file.write(struct.pack("<B", x))
+
 def write_packed_int64(file, x):
     file.write(struct.pack("<Q", x))
 
@@ -160,6 +163,8 @@ def process_file(
         frozen = instr.frozen()
         for op in frozen.src_ops + frozen.dst_ops:
             thread_idxs_from_instr[frozen].add((thread_idx, op.is_read))
+        if frozen.name == "syscall":
+            thread_idxs_from_instr[frozen].add((thread_idx, False))
         thread_accesses.add(ThreadAccess(
             thread_idx=thread_idx,
             instr_addr=frozen.address,
@@ -223,7 +228,7 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
             shared_memory.update(mem_intersection)
     truly_shared_instruction_addresses = set()
     for instr in thread_idxs_from_instr.keys():
-        if instr.addresses_touched & shared_memory:
+        if (instr.addresses_touched & shared_memory) or instr.name == "syscall":
             truly_shared_instruction_addresses.add((instr.address, instr.name))
 
     instrumented = []
@@ -281,7 +286,10 @@ with open(INSTRUCTIONS_PATH, "wb") as f:
     for instr in instrumented:
         write_packed_string(f, instr.module.path)
         write_packed_int64(f, instr.offset)
+        write_packed_bool8(f, instr.name == "syscall")
+
 print("Instrumented instruction count:", len(instrumented))
+#exit(0)
 
 print("Running tests...")
 #run_command(

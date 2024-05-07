@@ -66,6 +66,7 @@ struct InstrumentedInstruction {
   uintptr_t adddr_relative;
   uintptr_t module_base;
   uintptr_t addr_absolute;
+  bool is_syscall;
 };
 
 static Array<InstrumentedInstruction> the_instrumented_instrs;
@@ -404,8 +405,8 @@ static void event_module_load(void* drcontext, const module_data_t* info, bool l
     DR_ASSERT(instr.module_base == 0);
     instr.module_base = reinterpret_cast<uintptr_t>(info->start);
     instr.addr_absolute = instr.module_base + instr.adddr_relative;
-    dr_printf("Initialized instr: %p -> %p\n", reinterpret_cast<void*>(instr.adddr_relative),
-              reinterpret_cast<void*>(instr.addr_absolute));
+    dr_printf("Initialized instr: %p -> %p (syscall: %d)\n", reinterpret_cast<void*>(instr.adddr_relative),
+              reinterpret_cast<void*>(instr.addr_absolute), instr.is_syscall);
   }
 }
 
@@ -493,6 +494,11 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
       DR_ASSERT(ok);
       ok = instr_reader.ReadUint64LE(&the_instrumented_instrs[i].adddr_relative);
       DR_ASSERT(ok);
+
+      uint8_t is_syscall = 0;
+      ok = instr_reader.ReadUint8LE(&is_syscall);
+      DR_ASSERT(ok);
+      the_instrumented_instrs[i].is_syscall = (is_syscall != 0);
 
       dr_printf("Parsed instr %.*s, %d\n", StringArgs(the_instrumented_instrs[i].path),
                 the_instrumented_instrs[i].adddr_relative);
