@@ -426,6 +426,11 @@ static bool WrapInitializing() {
   return data->thread_idx == 0;
 }
 
+static int WrapRepeatDuringCollection(int n) {
+  void* drcontext = dr_get_current_drcontext();
+  drwrap_replace_native_fini(drcontext);
+  return n;
+}
 
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   /* We need 2 reg slots beyond drreg's eflags slots => 3 slots */
@@ -467,6 +472,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   replace_native("NextRun", WrapNextRun);
   replace_native("ReportTestResult", WrapReportTestResult);
   replace_native("Initializing", WrapInitializing);
+  replace_native("RepeatDuringCollection", WrapRepeatDuringCollection);
 
   dr_free_module_data(main_module);
 

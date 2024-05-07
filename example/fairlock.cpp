@@ -7,8 +7,10 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-bool volatile sink_prevent_optimization;
+bool volatile bool_sink_prevent_optimization;
+int volatile int_sink_prevent_optimization;
 bool volatile false_literal_prevent_optimization = false;
+int volatile one_literal_prevent_optimization = 1;
 
 extern "C" bool __attribute__((noinline)) NextRun() {
   __asm__ __volatile__("");
@@ -20,9 +22,15 @@ extern "C" bool __attribute__((noinline)) Initializing() {
   return false_literal_prevent_optimization;
 }
 
+extern "C" int __attribute__((noinline)) RepeatDuringCollection(int n) {
+  __asm__ __volatile__("");
+  int_sink_prevent_optimization = n;
+  return one_literal_prevent_optimization;
+}
+
 extern "C" void __attribute__((noinline)) ReportTestResult(bool ok) {
   __asm__ __volatile__("");
-  sink_prevent_optimization = ok;
+  bool_sink_prevent_optimization = ok;
 }
 
 bool wait_on_address(std::atomic<uint32_t>* address, uint32_t expected_value) {
@@ -69,7 +77,7 @@ void test() {
       x = 0;
     }
 
-    for (int i = 0; i < 100; ++i) {
+    for (int i = 0; i < RepeatDuringCollection(100); ++i) {
       lock.acquire();
       x = x + 1;
       x = x - 1;

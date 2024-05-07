@@ -293,8 +293,8 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
 
 static bool event_pre_syscall(void* drcontext, int sysnum) {
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
-  int running = dr_atomic_load32(&the_threads_running);
   if (data->thread_idx < 0) return true;
+  int running = dr_atomic_load32(&the_threads_running);
   if (running == 0) return true;
 
   dr_printf("Hello from pre syscall event: 0x%x, running: %d\n", sysnum, data->thread_idx, running);
