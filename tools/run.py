@@ -257,7 +257,7 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
 DYNAMORIO_DIR = "DynamoRIO"
 DYNAMORIO_CLIENTS_DIR = "build/src"
 COLLECT_DIR = "collect"
-APP_UNDER_TEST = "build/example/mutex"
+APP_UNDER_TEST = "build/example/fairlock"
 
 print("Deleting", COLLECT_DIR, "...")
 shutil.rmtree(COLLECT_DIR, ignore_errors=True)
@@ -281,6 +281,7 @@ with open(INSTRUCTIONS_PATH, "wb") as f:
     for instr in instrumented:
         write_packed_string(f, instr.module.path)
         write_packed_int64(f, instr.offset)
+print("Instrumented instruction count:", len(instrumented))
 
 print("Running tests...")
 #run_command(

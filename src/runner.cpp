@@ -51,6 +51,7 @@ static inline uint64_t perm_as_delta(uint64_t v) { return v ^ (v << 1); }
 struct ThreadData {
   bool initialized_instrumentation;
   int volatile running;
+  bool sleeping;
   thread_id_t thread_id;
   int64_t thread_idx;
   void* event;
@@ -191,6 +192,7 @@ static void WrapReportTestResult(bool result) {
 
   int remaining = dr_atomic_add32_return_sum(&the_threads_running, -1);
   dr_atomic_store32(&data->running, 0);
+  dr_printf("REMAINING: %d\n", remaining);
   DR_ASSERT(remaining >= 0);
 
   if (remaining > 0) {
@@ -236,6 +238,38 @@ static bool WrapInitializing() {
   return data->thread_idx == 0;
 }
 
+static bool WakeNextThread(ThreadData* thread, bool go_to_sleep) {
+  ThreadData* first_running_and_sleeping_idx = NULL;
+  for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
+    int64_t next_thread_idx = (thread->thread_idx + i) % ArrayCount(the_threads);
+    ThreadData* other = the_threads[next_thread_idx];
+    DR_ASSERT(other);
+    DR_ASSERT(other != thread);
+    if (!dr_atomic_load32(&other->running)) continue;
+
+    if (!first_running_and_sleeping_idx && !other->sleeping) {
+      first_running_and_sleeping_idx = other;
+    }
+
+    if (go_to_sleep) {
+      dr_printf("sleeping in context switch point: %d (%d)\n", thread->thread_idx, thread->thread_id);
+    }
+    DR_ASSERT(thread->event);
+    dr_event_signal(other->event);
+    if (go_to_sleep) {
+      dr_event_wait(thread->event);
+      dr_event_reset(thread->event);
+      dr_printf("WAKING in context switch point: %d\n", thread->thread_idx);
+    }
+    return true;
+  }
+
+  if (first_running_and_sleeping_idx) {
+    dr_printf("FAILED TO WAKE, but there was a running thread which was sleeping: %d. Deadlock?\n", first_running_and_sleeping_idx->thread_idx);
+  }
+  return false;
+}
+
 static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
@@ -249,28 +283,45 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
   dr_printf("%p In context switch point: %d\n", instr_addr_relative, data->thread_idx);
 
   if (should_switch) {
-    bool woke_someone = false;
-    for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
-      uint64_t next_thread_idx = (data->thread_idx + i) % ArrayCount(the_threads);
-      ThreadData* other = the_threads[next_thread_idx];
-      DR_ASSERT(other);
-      DR_ASSERT(other != data);
-      if (dr_atomic_load32(&other->running)) {
-        dr_printf("sleeping in context switch point: %d (%d)\n", data->thread_idx, data->thread_id);
-        DR_ASSERT(data->event);
-        dr_event_signal(other->event);
-        dr_event_wait(data->event);
-        dr_event_reset(data->event);
-        woke_someone = true;
-        dr_printf("WAKING in context switch point: %d\n", data->thread_idx);
-        break;
-      }
-    }
-    // RECONSIDER: Add this assert back when we do actual scheduling.
-    // DR_ASSERT(woke_someone);
+    bool woke_someone = WakeNextThread(data, true);
+    //DR_ASSERT(woke_someone);
   }
 
   dr_printf("LEAVING context switch point: %d\n", data->thread_idx);
+}
+
+static bool event_pre_syscall(void* drcontext, int sysnum) {
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+  int running = dr_atomic_load32(&the_threads_running);
+  if (data->thread_idx < 0) return true;
+  if (running == 0) return true;
+
+  dr_printf("Hello from pre syscall event: 0x%x, running: %d\n", sysnum, data->thread_idx, running);
+
+  if (sysnum == 0xca /* futex */) {
+    DR_ASSERT(!data->sleeping);
+    data->sleeping = true;
+
+    the_switch_mask >>= 1;
+    bool awoke_someone = WakeNextThread(data, false);
+    //DR_ASSERT(awoke_someone);
+  }
+
+  return true;
+}
+
+static void event_post_syscall(void* drcontext, int sysnum) {
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+  int running = dr_atomic_load32(&the_threads_running);
+  if (data->thread_idx < 0) return;
+  if (running == 0) return;
+
+  dr_printf("Hello from post syscall event: 0x%x, TID: %d, running: %d\n", sysnum, data->thread_idx, running);
+
+  if (sysnum == 0xca /* futex */) {
+    DR_ASSERT(data->sleeping);
+    data->sleeping = false;
+  }
 }
 
 static void instrument_instr(void* drcontext, instrlist_t* ilist, instr_t* where, instr_t* instr) {
@@ -358,6 +409,10 @@ static void event_module_load(void* drcontext, const module_data_t* info, bool l
   }
 }
 
+static bool event_filter_syscall(void* drcontext, int sysnum) {
+  return true;
+}
+
 static void event_thread_exit(void* drcontext) {
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   dr_thread_free(drcontext, data, sizeof(ThreadData));
@@ -374,11 +429,17 @@ static void event_exit(void) {
   dr_log(NULL, DR_LOG_ALL, 1, "Client 'runner' exit\n");
   if (!dr_raw_tls_cfree(tls_offs, TLS_OFFSET__COUNT)) DR_ASSERT(false);
 
-  if (!drmgr_unregister_tls_field(the_tls_idx) || !drmgr_unregister_thread_init_event(event_thread_init) ||
-      !drmgr_unregister_thread_exit_event(event_thread_exit) || !drmgr_unregister_bb_app2app_event(event_bb_app2app) ||
+  if (!drmgr_unregister_tls_field(the_tls_idx) ||
+      !drmgr_unregister_thread_init_event(event_thread_init) ||
+      !drmgr_unregister_thread_exit_event(event_thread_exit) ||
+      !drmgr_unregister_bb_app2app_event(event_bb_app2app) ||
       !drmgr_unregister_bb_insertion_event(event_app_instruction) ||
-      !drmgr_unregister_module_load_event(event_module_load) || drreg_exit() != DRREG_SUCCESS)
+      !drmgr_unregister_module_load_event(event_module_load) ||
+      !drmgr_unregister_pre_syscall_event(event_pre_syscall) ||
+      !drmgr_unregister_post_syscall_event(event_post_syscall) ||
+      drreg_exit() != DRREG_SUCCESS)
     DR_ASSERT(false);
+  dr_unregister_filter_syscall_event(event_filter_syscall);
 
   dr_mutex_destroy(the_mutex);
   drutil_exit();
@@ -448,10 +509,14 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   }
 
   dr_register_exit_event(event_exit);
-  if (!drmgr_register_thread_init_event(event_thread_init) || !drmgr_register_thread_exit_event(event_thread_exit) ||
+  dr_register_filter_syscall_event(event_filter_syscall);
+  if (!drmgr_register_thread_init_event(event_thread_init) ||
+      !drmgr_register_thread_exit_event(event_thread_exit) ||
       !drmgr_register_bb_app2app_event(event_bb_app2app, NULL) ||
       !drmgr_register_bb_instrumentation_event(NULL /*analysis_func*/, event_app_instruction, NULL) ||
-      !drmgr_register_module_load_event(event_module_load))
+      !drmgr_register_module_load_event(event_module_load) ||
+      !drmgr_register_pre_syscall_event(event_pre_syscall) ||
+      !drmgr_register_post_syscall_event(event_post_syscall))
     DR_ASSERT(false);
 
   the_client_id = id;
