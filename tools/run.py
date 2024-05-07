@@ -215,7 +215,7 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
         file_path = os.path.join(collect_directory, filename)
         file_size = os.path.getsize(file_path)
         if file_size > 1024**2:
-            print("skipping", filename, "cause too large:", file_size / 1024**2, "MB")
+            #print("skipping", filename, "cause too large:", file_size / 1024**2, "MB")
             continue
         process_file(thread_idxs_from_instr, thread_accesses, thread_idx, file_path)
 
@@ -262,7 +262,7 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
 DYNAMORIO_DIR = "DynamoRIO"
 DYNAMORIO_CLIENTS_DIR = "build/src"
 COLLECT_DIR = "collect"
-APP_UNDER_TEST = "build/example/fairlock"
+APP_UNDER_TEST = "build/example/futex"
 
 print("Deleting", COLLECT_DIR, "...")
 shutil.rmtree(COLLECT_DIR, ignore_errors=True)

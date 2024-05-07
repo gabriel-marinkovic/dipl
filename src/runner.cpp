@@ -158,6 +158,12 @@ static bool WrapNextRun() {
       the_current_perm_log = the_current_perm;
       the_switch_mask_log = the_switch_mask;
       the_current_perm = next_perm(the_current_perm);
+
+      dr_printf("Using mask 0b");
+      PrintBinary(the_switch_mask_log, the_instrumented_instrs.count * 2);
+      dr_printf(" (0b");
+      PrintBinary(the_current_perm_log, the_instrumented_instrs.count * 2);
+      dr_printf(")\n");
     } else {
       dr_atomic_store32(&the_done, 1);
 
@@ -185,7 +191,7 @@ static void WrapReportTestResult(bool result) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  // dr_printf("Hello from WrapReportTestResult! %d TID: %d\n", result, data->thread_idx);
+  dr_printf("Hello from WrapReportTestResult! %d TID: %d\n", result, data->thread_idx);
 
   if (result) {
     dr_atomic_add32_return_sum(&the_threads_successful, 1);
@@ -266,7 +272,8 @@ static bool WakeNextThread(ThreadData* thread, bool go_to_sleep) {
   }
 
   if (first_running_and_sleeping_idx) {
-    dr_printf("FAILED TO WAKE, but there was a running thread which was sleeping: %d. Deadlock?\n", first_running_and_sleeping_idx->thread_idx);
+    dr_printf("FAILED TO WAKE, but there was a running thread which was sleeping: %d. Deadlock?\n",
+              first_running_and_sleeping_idx->thread_idx);
   }
   return false;
 }
@@ -283,9 +290,16 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
 
   dr_printf("%p In context switch point: %d\n", instr_addr_relative, data->thread_idx);
 
+  for (InstrumentedInstruction& instr : the_instrumented_instrs) {
+    if (instr.adddr_relative != instr_addr_relative) continue;
+    if (!instr.is_syscall) continue;
+    dr_printf("    Context switch point is syscall, and we ate %d\n", should_switch);
+    break;
+  }
+
   if (should_switch) {
     bool woke_someone = WakeNextThread(data, true);
-    //DR_ASSERT(woke_someone);
+    // DR_ASSERT(woke_someone);
   }
 
   dr_printf("LEAVING context switch point: %d\n", data->thread_idx);
@@ -297,15 +311,14 @@ static bool event_pre_syscall(void* drcontext, int sysnum) {
   int running = dr_atomic_load32(&the_threads_running);
   if (running == 0) return true;
 
-  dr_printf("Hello from pre syscall event: 0x%x, running: %d\n", sysnum, data->thread_idx, running);
+  dr_printf("Hello from pre syscall event: 0x%x, TID: %d\n", sysnum, data->thread_idx);
 
   if (sysnum == 0xca /* futex */) {
     DR_ASSERT(!data->sleeping);
     data->sleeping = true;
 
-    the_switch_mask >>= 1;
     bool awoke_someone = WakeNextThread(data, false);
-    //DR_ASSERT(awoke_someone);
+    // DR_ASSERT(awoke_someone);
   }
 
   return true;
@@ -410,9 +423,7 @@ static void event_module_load(void* drcontext, const module_data_t* info, bool l
   }
 }
 
-static bool event_filter_syscall(void* drcontext, int sysnum) {
-  return true;
-}
+static bool event_filter_syscall(void* drcontext, int sysnum) { return true; }
 
 static void event_thread_exit(void* drcontext) {
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
@@ -430,15 +441,12 @@ static void event_exit(void) {
   dr_log(NULL, DR_LOG_ALL, 1, "Client 'runner' exit\n");
   if (!dr_raw_tls_cfree(tls_offs, TLS_OFFSET__COUNT)) DR_ASSERT(false);
 
-  if (!drmgr_unregister_tls_field(the_tls_idx) ||
-      !drmgr_unregister_thread_init_event(event_thread_init) ||
-      !drmgr_unregister_thread_exit_event(event_thread_exit) ||
-      !drmgr_unregister_bb_app2app_event(event_bb_app2app) ||
+  if (!drmgr_unregister_tls_field(the_tls_idx) || !drmgr_unregister_thread_init_event(event_thread_init) ||
+      !drmgr_unregister_thread_exit_event(event_thread_exit) || !drmgr_unregister_bb_app2app_event(event_bb_app2app) ||
       !drmgr_unregister_bb_insertion_event(event_app_instruction) ||
       !drmgr_unregister_module_load_event(event_module_load) ||
       !drmgr_unregister_pre_syscall_event(event_pre_syscall) ||
-      !drmgr_unregister_post_syscall_event(event_post_syscall) ||
-      drreg_exit() != DRREG_SUCCESS)
+      !drmgr_unregister_post_syscall_event(event_post_syscall) || drreg_exit() != DRREG_SUCCESS)
     DR_ASSERT(false);
   dr_unregister_filter_syscall_event(event_filter_syscall);
 
@@ -516,12 +524,10 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
 
   dr_register_exit_event(event_exit);
   dr_register_filter_syscall_event(event_filter_syscall);
-  if (!drmgr_register_thread_init_event(event_thread_init) ||
-      !drmgr_register_thread_exit_event(event_thread_exit) ||
+  if (!drmgr_register_thread_init_event(event_thread_init) || !drmgr_register_thread_exit_event(event_thread_exit) ||
       !drmgr_register_bb_app2app_event(event_bb_app2app, NULL) ||
       !drmgr_register_bb_instrumentation_event(NULL /*analysis_func*/, event_app_instruction, NULL) ||
-      !drmgr_register_module_load_event(event_module_load) ||
-      !drmgr_register_pre_syscall_event(event_pre_syscall) ||
+      !drmgr_register_module_load_event(event_module_load) || !drmgr_register_pre_syscall_event(event_pre_syscall) ||
       !drmgr_register_post_syscall_event(event_post_syscall))
     DR_ASSERT(false);
 
