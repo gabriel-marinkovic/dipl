@@ -51,7 +51,11 @@ static inline uint64_t perm_as_delta(uint64_t v) { return v ^ (v << 1); }
 struct ThreadData {
   bool initialized_instrumentation;
   int volatile running;
-  bool sleeping;
+
+  // Futex state.
+  uint32_t* sleeping_on;
+  uint32_t sleeping_until;
+
   thread_id_t thread_id;
   int64_t thread_idx;
   void* event;
@@ -254,7 +258,7 @@ static bool WakeNextThread(ThreadData* thread, bool go_to_sleep) {
     DR_ASSERT(other != thread);
     if (!dr_atomic_load32(&other->running)) continue;
 
-    if (!first_running_and_sleeping_idx && !other->sleeping) {
+    if (!first_running_and_sleeping_idx && !other->sleeping_on) {
       first_running_and_sleeping_idx = other;
     }
 
@@ -314,11 +318,22 @@ static bool event_pre_syscall(void* drcontext, int sysnum) {
   dr_printf("Hello from pre syscall event: 0x%x, TID: %d\n", sysnum, data->thread_idx);
 
   if (sysnum == 0xca /* futex */) {
-    DR_ASSERT(!data->sleeping);
-    data->sleeping = true;
+    uint32_t* address = (uint32_t*)dr_syscall_get_param(drcontext, 0);
+    int futex_op = (int)dr_syscall_get_param(drcontext, 1);
 
-    bool awoke_someone = WakeNextThread(data, false);
-    // DR_ASSERT(awoke_someone);
+    if (futex_op == 0 /* FUTEX_WAIT */) {
+      uint32_t expected_value = (uint32_t)dr_syscall_get_param(drcontext, 2);
+      dr_printf("(TID: %d) PRE syscall; op: WAIT, address: %p, expected_value: %u\n", data->thread_idx, address, expected_value);
+
+      DR_ASSERT(!data->sleeping_on);
+      data->sleeping_on = address;
+      data->sleeping_until = expected_value;
+
+      bool awoke_someone = WakeNextThread(data, false);
+      DR_ASSERT(awoke_someone);
+    } else if (futex_op == 1 /* FUTEX_WAKE */) {
+      dr_printf("(TID: %d) PRE syscall; op: WAKE, address: %p\n", data->thread_idx, address);
+    }
   }
 
   return true;
@@ -332,10 +347,10 @@ static void event_post_syscall(void* drcontext, int sysnum) {
 
   dr_printf("Hello from post syscall event: 0x%x, TID: %d, running: %d\n", sysnum, data->thread_idx, running);
 
-  if (sysnum == 0xca /* futex */) {
-    DR_ASSERT(data->sleeping);
-    data->sleeping = false;
-  }
+  //if (sysnum == 0xca /* futex */) {
+  //  DR_ASSERT(data->sleeping);
+  //  data->sleeping = false;
+  //}
 }
 
 static void instrument_instr(void* drcontext, instrlist_t* ilist, instr_t* where, instr_t* instr) {
