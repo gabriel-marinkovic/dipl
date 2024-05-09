@@ -1,3 +1,4 @@
+#include <getopt.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -115,7 +116,7 @@ static int volatile the_threads_successful;
 static uint64_t the_first_perm;
 static uint64_t the_last_perm;
 static uint64_t the_current_perm;
-static uint64_t the_switch_mask = 0;
+static uint64_t the_switch_mask;
 static uint64_t the_current_perm_log;
 static uint64_t the_switch_mask_log;
 
@@ -163,11 +164,11 @@ static bool WrapNextRun() {
       the_switch_mask_log = the_switch_mask;
       the_current_perm = next_perm(the_current_perm);
 
-      dr_printf("Using mask 0b");
-      PrintBinary(the_switch_mask_log, the_instrumented_instrs.count * 2);
-      dr_printf(" (0b");
-      PrintBinary(the_current_perm_log, the_instrumented_instrs.count * 2);
-      dr_printf(")\n");
+      //dr_printf("Using mask 0b");
+      //PrintBinary(the_switch_mask_log, the_instrumented_instrs.count * 2);
+      //dr_printf(" (0b");
+      //PrintBinary(the_current_perm_log, the_instrumented_instrs.count * 2);
+      //dr_printf(")\n");
     } else {
       dr_atomic_store32(&the_done, 1);
 
@@ -195,7 +196,7 @@ static void WrapReportTestResult(bool result) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  dr_printf("Hello from WrapReportTestResult! %d TID: %d\n", result, data->thread_idx);
+  // dr_printf("Hello from WrapReportTestResult! %d TID: %d\n", result, data->thread_idx);
 
   if (result) {
     dr_atomic_add32_return_sum(&the_threads_successful, 1);
@@ -203,7 +204,7 @@ static void WrapReportTestResult(bool result) {
 
   int remaining = dr_atomic_add32_return_sum(&the_threads_running, -1);
   dr_atomic_store32(&data->running, 0);
-  dr_printf("REMAINING: %d\n", remaining);
+  // dr_printf("REMAINING: %d\n", remaining);
   DR_ASSERT(remaining >= 0);
 
   if (remaining > 0) {
@@ -230,13 +231,17 @@ static void WrapReportTestResult(bool result) {
     if (all_successful) ++total_successes;
     ++total_runs;
 
-    const char* prefix = all_successful ? ":) :)" : "!!!!!";
-    dr_printf("%s %d / %d threads FAILED for mask 0b", prefix, (ArrayCount(the_threads) - successes),
-              ArrayCount(the_threads));
-    PrintBinary(the_switch_mask_log, the_instrumented_instrs.count * 2);
-    dr_printf(" (0b");
-    PrintBinary(the_current_perm_log, the_instrumented_instrs.count * 2);
-    dr_printf(")\n");
+    if (!all_successful) {
+      const char* prefix = all_successful ? ":) :)" : "!!!!!";
+      dr_printf("%s %d / %d threads FAILED for mask 0b", prefix, (ArrayCount(the_threads) - successes),
+                ArrayCount(the_threads));
+      PrintBinary(the_switch_mask_log, the_instrumented_instrs.count * 2);
+      dr_printf(" (0b");
+      PrintBinary(the_current_perm_log, the_instrumented_instrs.count * 2);
+      dr_printf(") (hex permutation: 0x%x)\n", the_current_perm_log);
+
+      dr_abort();
+    }
   }
 
   drwrap_replace_native_fini(drcontext);
@@ -263,21 +268,21 @@ static bool WakeNextThread(ThreadData* thread, bool go_to_sleep) {
     }
 
     if (go_to_sleep) {
-      dr_printf("sleeping in context switch point: %d (%d)\n", thread->thread_idx, thread->thread_id);
+      // dr_printf("sleeping in context switch point: %d (%d)\n", thread->thread_idx, thread->thread_id);
     }
     DR_ASSERT(thread->event);
     dr_event_signal(other->event);
     if (go_to_sleep) {
       dr_event_wait(thread->event);
       dr_event_reset(thread->event);
-      dr_printf("WAKING in context switch point: %d\n", thread->thread_idx);
+      // dr_printf("WAKING in context switch point: %d\n", thread->thread_idx);
     }
     return true;
   }
 
   if (first_running_and_sleeping_idx) {
-    dr_printf("FAILED TO WAKE, but there was a running thread which was sleeping: %d. Deadlock?\n",
-              first_running_and_sleeping_idx->thread_idx);
+    // dr_printf("FAILED TO WAKE, but there was a running thread which was sleeping: %d. Deadlock?\n",
+    //           first_running_and_sleeping_idx->thread_idx);
   }
   return false;
 }
@@ -292,12 +297,12 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
   bool should_switch = the_switch_mask & 1;
   the_switch_mask >>= 1;
 
-  dr_printf("%p In context switch point: %d\n", instr_addr_relative, data->thread_idx);
+  // dr_printf("%p In context switch point: %d\n", instr_addr_relative, data->thread_idx);
 
   for (InstrumentedInstruction& instr : the_instrumented_instrs) {
     if (instr.adddr_relative != instr_addr_relative) continue;
     if (!instr.is_syscall) continue;
-    dr_printf("    Context switch point is syscall, and we ate %d\n", should_switch);
+    // dr_printf("    Context switch point is syscall, and we ate %d\n", should_switch);
     break;
   }
 
@@ -306,7 +311,7 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
     // DR_ASSERT(woke_someone);
   }
 
-  dr_printf("LEAVING context switch point: %d\n", data->thread_idx);
+  // dr_printf("LEAVING context switch point: %d\n", data->thread_idx);
 }
 
 static bool event_pre_syscall(void* drcontext, int sysnum) {
@@ -315,7 +320,7 @@ static bool event_pre_syscall(void* drcontext, int sysnum) {
   int running = dr_atomic_load32(&the_threads_running);
   if (running == 0) return true;
 
-  dr_printf("Hello from pre syscall event: 0x%x, TID: %d\n", sysnum, data->thread_idx);
+  // dr_printf("Hello from pre syscall event: 0x%x, TID: %d\n", sysnum, data->thread_idx);
 
   if (sysnum == 0xca /* futex */) {
     uint32_t* address = (uint32_t*)dr_syscall_get_param(drcontext, 0);
@@ -323,7 +328,8 @@ static bool event_pre_syscall(void* drcontext, int sysnum) {
 
     if (futex_op == 0 /* FUTEX_WAIT */) {
       uint32_t expected_value = (uint32_t)dr_syscall_get_param(drcontext, 2);
-      dr_printf("(TID: %d) PRE syscall; op: WAIT, address: %p, expected_value: %u\n", data->thread_idx, address, expected_value);
+      dr_printf("(TID: %d) PRE syscall; op: WAIT, address: %p, expected_value: %u\n", data->thread_idx, address,
+                expected_value);
 
       DR_ASSERT(!data->sleeping_on);
       data->sleeping_on = address;
@@ -345,12 +351,12 @@ static void event_post_syscall(void* drcontext, int sysnum) {
   if (data->thread_idx < 0) return;
   if (running == 0) return;
 
-  dr_printf("Hello from post syscall event: 0x%x, TID: %d, running: %d\n", sysnum, data->thread_idx, running);
+  // dr_printf("Hello from post syscall event: 0x%x, TID: %d, running: %d\n", sysnum, data->thread_idx, running);
 
-  //if (sysnum == 0xca /* futex */) {
-  //  DR_ASSERT(data->sleeping);
-  //  data->sleeping = false;
-  //}
+  // if (sysnum == 0xca /* futex */) {
+  //   DR_ASSERT(data->sleeping);
+  //   data->sleeping = false;
+  // }
 }
 
 static void instrument_instr(void* drcontext, instrlist_t* ilist, instr_t* where, instr_t* instr) {
@@ -482,18 +488,39 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
       drsym_init(0) != DRSYM_SUCCESS)
     DR_ASSERT(false);
 
+  const char* instr_path = NULL;
+  bool got_permutation = false;
+  uint64_t permutation = 0;
+  int opt;
+  // clang-format off
+  static struct option long_options[] = {
+      {"instructions_file", required_argument, 0, 'i'},
+      {"permutation",       required_argument, 0, 'p'},
+      {0, 0, 0, 0}
+  };
+  // clang-format on
+  while ((opt = getopt_long(argc, (char**)argv, "i:p:", long_options, NULL)) != -1) {
+    switch (opt) {
+      case 'i':
+        instr_path = optarg;
+        break;
+      case 'p':
+        got_permutation = true;
+        permutation = strtoull(optarg, NULL, 16);
+        break;
+      case '?':
+        fprintf(stderr, "Usage: %s [--instructions_file=<file>] [--permutation=<hex>]\n", argv[0]);
+        exit(EXIT_FAILURE);
+      default:
+        break;
+    }
+  }
+
+  DR_ASSERT(instr_path);
+  dr_printf("Instructions file: %s\n", instr_path);
+
   // Initialize `the_instrumented_instrs` from path given in `argv`.
   {
-    if (argc != 3) {
-      dr_fprintf(STDERR, "Error: Client must be invoked with a single CLI parameter `-instructions_file`\n");
-      dr_abort();
-    }
-    if (strcmp(argv[1], "-instructions_file") != 0) {
-      dr_fprintf(STDERR, "Error: Client must be invoked with a single CLI parameter `-instructions_file`\n");
-      dr_abort();
-    }
-
-    const char* instr_path = argv[2];
     file_t instr_file = dr_open_file(instr_path, DR_FILE_READ);
     DR_ASSERT(instr_file != INVALID_FILE);
 
@@ -532,10 +559,20 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
 
   // Initialize global permutation state.
   {
-    the_first_perm = first_perm(the_instrumented_instrs.count * 2, the_instrumented_instrs.count);
-    the_last_perm = last_perm(the_instrumented_instrs.count * 2, the_instrumented_instrs.count);
+    if (got_permutation) {
+      dr_printf("Using explicit permutation: 0x%016llx\n", permutation);
+    }
+    if (got_permutation) {
+      the_first_perm = permutation;
+      the_last_perm = permutation;
+    } else {
+      the_first_perm = first_perm(the_instrumented_instrs.count * 2, the_instrumented_instrs.count);
+      the_last_perm = last_perm(the_instrumented_instrs.count * 2, the_instrumented_instrs.count);
+    }
     the_current_perm = the_first_perm;
+    the_current_perm_log = the_first_perm;
   }
+
 
   dr_register_exit_event(event_exit);
   dr_register_filter_syscall_event(event_filter_syscall);

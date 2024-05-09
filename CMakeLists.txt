@@ -12,7 +12,5 @@ if (NOT DynamoRIO_FOUND)
   message(FATAL_ERROR "DynamoRIO package required to build")
 endif()
 
-find_package(DrMemoryFramework)
-
 add_subdirectory(src)
 add_subdirectory(example)

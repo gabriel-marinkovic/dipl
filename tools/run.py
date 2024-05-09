@@ -262,7 +262,7 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
 DYNAMORIO_DIR = "DynamoRIO"
 DYNAMORIO_CLIENTS_DIR = "build/src"
 COLLECT_DIR = "collect"
-APP_UNDER_TEST = "build/example/futex"
+APP_UNDER_TEST = "build/example/stack_naive"
 
 print("Deleting", COLLECT_DIR, "...")
 shutil.rmtree(COLLECT_DIR, ignore_errors=True)
@@ -298,10 +298,12 @@ print("Running tests...")
 #    "--", APP_UNDER_TEST,
 #    silent_errors=True,
 #)
-subprocess.run([
+cmds = [
     os.path.join(DYNAMORIO_DIR, "bin64/drrun"),
-    "-c", os.path.join(DYNAMORIO_CLIENTS_DIR, "librunner.so"), "-instructions_file", INSTRUCTIONS_PATH,
+    "-c", os.path.join(DYNAMORIO_CLIENTS_DIR, "librunner.so"), "--instructions_file", INSTRUCTIONS_PATH,
     "--", APP_UNDER_TEST,
-])
+]
+subprocess.run(cmds)
 
 print("All done!")
+print(" ".join(cmds))
