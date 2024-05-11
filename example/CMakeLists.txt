@@ -1,6 +1,5 @@
 add_compile_options(-g -ggdb -pthread -O2)
 
-link_libraries(test_tools)
 include_directories("../src/test_tools")
 
 add_subdirectory(lockfree)

@@ -393,31 +393,6 @@ static void event_module_load(void* drcontext, const module_data_t* info, bool l
   dr_mutex_lock(the_module_mutex);
   Defer(dr_mutex_unlock(the_module_mutex));
 
-  if (SuffixEquals(Wrap(info->full_path), Wrap("test_tools.so"))) {
-    auto replace_native = [info](const char* name, auto* replace_with) {
-      dr_printf("Replacing function %s\n", name);
-
-      size_t offset = 0;
-      drsym_error_t status = drsym_lookup_symbol(info->full_path, name, &offset, DRSYM_DEFAULT_FLAGS);
-      DR_ASSERT(status == DRSYM_SUCCESS);
-
-      uintptr_t addr = reinterpret_cast<uintptr_t>(info->start) + offset;
-      bool ok =
-          drwrap_replace_native(reinterpret_cast<app_pc>(addr),
-                                reinterpret_cast<app_pc>(reinterpret_cast<void*>(replace_with)), true, 0, NULL, false);
-    };
-
-    replace_native("Instrumenting", WrapInstrumenting);
-    replace_native("InstrumentationPause", WrapInstrumentationPause);
-    replace_native("InstrumentationResume", WrapInstrumentationResume);
-    // `InstrumentingWaitForAll` in userspace.
-    replace_native("NextRun", WrapNextRun);
-    // `WrapRunDone` already noop.
-    replace_native("ThreadIdx", WrapThreadIdx);
-    // `MustAlways` already noop.
-    // `MustAtleastOnce` already noop.
-  }
-
   the_module_writer.WriteUint8LE(loaded ? 1 : 0);
   the_module_writer.WriteUint64LE(reinterpret_cast<uintptr_t>(info->entry_point));
   the_module_writer.WriteUint64LE(reinterpret_cast<uintptr_t>(info->preferred_base));
@@ -482,6 +457,34 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   the_client_id = id;
   the_mutex = dr_mutex_create();
   the_module_mutex = dr_mutex_create();
+
+  module_data_t* main_module = dr_get_main_module();
+  DR_ASSERT(main_module);
+
+  auto replace_native = [main_module](const char* name, auto* replace_with) {
+    dr_printf("Replacing function %s\n", name);
+
+    size_t offset = 0;
+    drsym_error_t status = drsym_lookup_symbol(main_module->full_path, name, &offset, DRSYM_DEFAULT_FLAGS);
+    DR_ASSERT(status == DRSYM_SUCCESS);
+
+    uintptr_t addr = reinterpret_cast<uintptr_t>(main_module->start) + offset;
+    bool ok =
+        drwrap_replace_native(reinterpret_cast<app_pc>(addr),
+                              reinterpret_cast<app_pc>(reinterpret_cast<void*>(replace_with)), true, 0, NULL, false);
+  };
+
+  replace_native("Instrumenting", WrapInstrumenting);
+  replace_native("InstrumentationPause", WrapInstrumentationPause);
+  replace_native("InstrumentationResume", WrapInstrumentationResume);
+  // `InstrumentingWaitForAll` in userspace.
+  replace_native("NextRun", WrapNextRun);
+  // `WrapRunDone` already noop.
+  replace_native("ThreadIdx", WrapThreadIdx);
+  // `MustAlways` already noop.
+  // `MustAtleastOnce` already noop.
+
+  dr_free_module_data(main_module);
 
   file_t module_file = OpenUniqueFile(Wrap("./collect"), Wrap("module"), Wrap("module"), false, true);
   BufferedFileWriter::Make(&the_module_writer, nullptr, module_file, 1024);
