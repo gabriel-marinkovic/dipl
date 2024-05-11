@@ -97,6 +97,52 @@ static int the_tls_idx;
 #define BUF_PTR(tls_base) *(MemoryReference**)TLS_SLOT(tls_base, TLS_OFFSET_BUF_PTR)
 #define IS_INSTRUMENTING(tls_base) *(uintptr_t*)TLS_SLOT(tls_base, TLS_OFFSET_IS_INSTRUMENTING)
 
+static bool WrapInstrumenting() {
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+  drwrap_replace_native_fini(drcontext);
+  return data->entered_instrumentation;
+}
+
+static void WrapInstrumentationPause() {
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+  DR_ASSERT(IS_INSTRUMENTING(data->seg_base));
+  IS_INSTRUMENTING(data->seg_base) = 0;
+  drwrap_replace_native_fini(drcontext);
+}
+
+static void WrapInstrumentationResume() {
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+  DR_ASSERT(!IS_INSTRUMENTING(data->seg_base));
+  IS_INSTRUMENTING(data->seg_base) = 1;
+  drwrap_replace_native_fini(drcontext);
+}
+
+static bool WrapNextRun() {
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+
+  dr_printf("Hello from WrapNextRun!\n");
+
+  bool was_instrumenting = data->entered_instrumentation;
+  if (!was_instrumenting) {
+    DR_ASSERT(IS_INSTRUMENTING(data->seg_base) == 0);
+    IS_INSTRUMENTING(data->seg_base) = 1;
+  }
+  data->entered_instrumentation = true;
+  drwrap_replace_native_fini(drcontext);
+  return !was_instrumenting;
+}
+
+static int WrapThreadIdx() {
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+  drwrap_replace_native_fini(drcontext);
+  return data->thread_idx;
+}
+
 static void memtrace(void* drcontext) {
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   MemoryReference* buf_ptr = BUF_PTR(data->seg_base);
@@ -347,6 +393,31 @@ static void event_module_load(void* drcontext, const module_data_t* info, bool l
   dr_mutex_lock(the_module_mutex);
   Defer(dr_mutex_unlock(the_module_mutex));
 
+  if (SuffixEquals(Wrap(info->full_path), Wrap("test_tools.so"))) {
+    auto replace_native = [info](const char* name, auto* replace_with) {
+      dr_printf("Replacing function %s\n", name);
+
+      size_t offset = 0;
+      drsym_error_t status = drsym_lookup_symbol(info->full_path, name, &offset, DRSYM_DEFAULT_FLAGS);
+      DR_ASSERT(status == DRSYM_SUCCESS);
+
+      uintptr_t addr = reinterpret_cast<uintptr_t>(info->start) + offset;
+      bool ok =
+          drwrap_replace_native(reinterpret_cast<app_pc>(addr),
+                                reinterpret_cast<app_pc>(reinterpret_cast<void*>(replace_with)), true, 0, NULL, false);
+    };
+
+    replace_native("Instrumenting", WrapInstrumenting);
+    replace_native("InstrumentationPause", WrapInstrumentationPause);
+    replace_native("InstrumentationResume", WrapInstrumentationResume);
+    // `InstrumentingWaitForAll` in userspace.
+    replace_native("NextRun", WrapNextRun);
+    // `WrapRunDone` already noop.
+    replace_native("ThreadIdx", WrapThreadIdx);
+    // `MustAlways` already noop.
+    // `MustAtleastOnce` already noop.
+  }
+
   the_module_writer.WriteUint8LE(loaded ? 1 : 0);
   the_module_writer.WriteUint64LE(reinterpret_cast<uintptr_t>(info->entry_point));
   the_module_writer.WriteUint64LE(reinterpret_cast<uintptr_t>(info->preferred_base));
@@ -392,46 +463,6 @@ static void event_exit(void) {
   // printf("we done\n");
 }
 
-static bool WrapNextRun() {
-  void* drcontext = dr_get_current_drcontext();
-  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
-
-  dr_printf("Hello from WrapNextRun!\n");
-
-  bool was_instrumenting = data->entered_instrumentation;
-  if (!was_instrumenting) {
-    DR_ASSERT(IS_INSTRUMENTING(data->seg_base) == 0);
-    IS_INSTRUMENTING(data->seg_base) = 1;
-  }
-  data->entered_instrumentation = true;
-  drwrap_replace_native_fini(drcontext);
-  return !was_instrumenting;
-}
-
-static void WrapReportTestResult(bool result) {
-  void* drcontext = dr_get_current_drcontext();
-  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
-
-  dr_printf("Hello from WrapReportTestResult! %d\n", result);
-
-  DR_ASSERT(IS_INSTRUMENTING(data->seg_base));
-  IS_INSTRUMENTING(data->seg_base) = 0;
-  drwrap_replace_native_fini(drcontext);
-}
-
-static bool WrapInitializing() {
-  void* drcontext = dr_get_current_drcontext();
-  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
-  drwrap_replace_native_fini(drcontext);
-  return data->thread_idx == 0;
-}
-
-static int WrapRepeatDuringCollection(int n) {
-  void* drcontext = dr_get_current_drcontext();
-  drwrap_replace_native_fini(drcontext);
-  return n;
-}
-
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   /* We need 2 reg slots beyond drreg's eflags slots => 3 slots */
   drreg_options_t ops = {sizeof(ops), 3, false};
@@ -454,27 +485,6 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
 
   file_t module_file = OpenUniqueFile(Wrap("./collect"), Wrap("module"), Wrap("module"), false, true);
   BufferedFileWriter::Make(&the_module_writer, nullptr, module_file, 1024);
-
-  module_data_t* main_module = dr_get_main_module();
-  DR_ASSERT(main_module);
-
-  auto replace_native = [&main_module](const char* name, auto* replace_with) {
-    size_t offset = 0;
-    drsym_error_t status = drsym_lookup_symbol(main_module->full_path, name, &offset, DRSYM_DEFAULT_FLAGS);
-    DR_ASSERT(status == DRSYM_SUCCESS);
-
-    uintptr_t addr = reinterpret_cast<uintptr_t>(main_module->start) + offset;
-    bool ok =
-        drwrap_replace_native(reinterpret_cast<app_pc>(addr),
-                              reinterpret_cast<app_pc>(reinterpret_cast<void*>(replace_with)), true, 0, NULL, false);
-  };
-
-  replace_native("NextRun", WrapNextRun);
-  replace_native("ReportTestResult", WrapReportTestResult);
-  replace_native("Initializing", WrapInitializing);
-  replace_native("RepeatDuringCollection", WrapRepeatDuringCollection);
-
-  dr_free_module_data(main_module);
 
   the_tls_idx = drmgr_register_tls_field();
   DR_ASSERT(the_tls_idx != -1);

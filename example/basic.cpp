@@ -2,35 +2,13 @@
 #include <thread>
 #include <cassert>
 #include <iostream>
-
-volatile bool sink_prevent_optimization;
-volatile bool false_literal_prevent_optimization = false;
-
-extern "C" bool __attribute__((noinline)) NextRun() {
-  __asm__ __volatile__("");
-  return false_literal_prevent_optimization;
-}
-
-extern "C" bool __attribute__((noinline)) Initializing() {
-  __asm__ __volatile__("");
-  return false_literal_prevent_optimization;
-}
-
-extern "C" void __attribute__((noinline)) ReportTestResult(bool ok) {
-  __asm__ __volatile__("");
-  sink_prevent_optimization = ok;
-}
+#include "test_tools.h"
 
 std::atomic<int> x{0};
 
-// Plan:
-// Leave `Initializing` for last
-// 1) Rename Begin/End into `NextRun` and `ReportTestResult`
-// 2) Wrap them
-
 void test() {
   while (NextRun()) {
-    if (Initializing()) {
+    if (ThreadIdx() == 0) {
       x = 0;
     }
 
@@ -42,7 +20,8 @@ void test() {
 
     int tmp3 = x.load(std::memory_order_seq_cst);
 
-    ReportTestResult(tmp3 == 0);
+    MustAlways(tmp3 == 0);
+    RunDone();
   }
 }
 

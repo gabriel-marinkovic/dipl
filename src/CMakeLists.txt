@@ -1,3 +1,5 @@
+add_subdirectory(test_tools)
+
 add_library(client SHARED client.cpp common.cpp)
 configure_DynamoRIO_client(client)
 use_DynamoRIO_extension(client drmgr)

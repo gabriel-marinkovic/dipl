@@ -120,6 +120,10 @@ static uint64_t the_switch_mask;
 static uint64_t the_current_perm_log;
 static uint64_t the_switch_mask_log;
 
+static void WrapInstrumentingWaitForAll() {
+
+}
+
 static bool WrapNextRun() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
@@ -192,15 +196,11 @@ static bool WrapNextRun() {
   return !done;
 }
 
-static void WrapReportTestResult(bool result) {
+static void WrapRunDone() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  // dr_printf("Hello from WrapReportTestResult! %d TID: %d\n", result, data->thread_idx);
-
-  if (result) {
-    dr_atomic_add32_return_sum(&the_threads_successful, 1);
-  }
+  // dr_printf("Hello from WrapRunDone! %d TID: %d\n", result, data->thread_idx);
 
   int remaining = dr_atomic_add32_return_sum(&the_threads_running, -1);
   dr_atomic_store32(&data->running, 0);
@@ -247,11 +247,21 @@ static void WrapReportTestResult(bool result) {
   drwrap_replace_native_fini(drcontext);
 }
 
-static bool WrapInitializing() {
+static int WrapThreadIdx() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   drwrap_replace_native_fini(drcontext);
-  return data->thread_idx == 0;
+  return data->thread_idx;
+}
+
+static void WrapMustAlways(bool result) {
+  if (result) {
+    dr_atomic_add32_return_sum(&the_threads_successful, 1);
+  }
+}
+
+static void WrapMustAtleastOnce(bool result) {
+  DR_ASSERT(false && "not implemented!");
 }
 
 static bool WakeNextThread(ThreadData* thread, bool go_to_sleep) {
@@ -434,6 +444,31 @@ static void event_module_load(void* drcontext, const module_data_t* info, bool l
   dr_mutex_lock(the_mutex);
   Defer(dr_mutex_unlock(the_mutex));
 
+  if (SuffixEquals(Wrap(info->full_path), Wrap("test_tools.so"))) {
+    auto replace_native = [info](const char* name, auto* replace_with) {
+      dr_printf("Replacing function %s\n", name);
+
+      size_t offset = 0;
+      drsym_error_t status = drsym_lookup_symbol(info->full_path, name, &offset, DRSYM_DEFAULT_FLAGS);
+      DR_ASSERT(status == DRSYM_SUCCESS);
+
+      uintptr_t addr = reinterpret_cast<uintptr_t>(info->start) + offset;
+      bool ok =
+          drwrap_replace_native(reinterpret_cast<app_pc>(addr),
+                                reinterpret_cast<app_pc>(reinterpret_cast<void*>(replace_with)), true, 0, NULL, false);
+    };
+
+    // `Instrumenting` is already `return false`.
+    // `InstrumentationPause` is already noop.
+    // `InstrumentationResume` is already noop.
+    replace_native("InstrumentingWaitForAll", WrapInstrumentingWaitForAll);
+    replace_native("NextRun", WrapNextRun);
+    replace_native("RunDone", WrapRunDone);
+    replace_native("ThreadIdx", WrapThreadIdx);
+    replace_native("MustAlways", WrapMustAlways);
+    replace_native("MustAtleastOnce", WrapMustAtleastOnce);
+  }
+
   for (InstrumentedInstruction& instr : the_instrumented_instrs) {
     if (instr.path != Wrap(info->full_path)) continue;
     DR_ASSERT(instr.module_base == 0);
@@ -588,22 +623,6 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
 
   module_data_t* main_module = dr_get_main_module();
   DR_ASSERT(main_module);
-
-  auto replace_native = [&main_module](const char* name, auto* replace_with) {
-    size_t offset = 0;
-    drsym_error_t status = drsym_lookup_symbol(main_module->full_path, name, &offset, DRSYM_DEFAULT_FLAGS);
-    DR_ASSERT(status == DRSYM_SUCCESS);
-
-    uintptr_t addr = reinterpret_cast<uintptr_t>(main_module->start) + offset;
-    bool ok =
-        drwrap_replace_native(reinterpret_cast<app_pc>(addr),
-                              reinterpret_cast<app_pc>(reinterpret_cast<void*>(replace_with)), true, 0, NULL, false);
-  };
-
-  replace_native("NextRun", WrapNextRun);
-  replace_native("ReportTestResult", WrapReportTestResult);
-  replace_native("Initializing", WrapInitializing);
-
   dr_free_module_data(main_module);
 
   the_tls_idx = drmgr_register_tls_field();
