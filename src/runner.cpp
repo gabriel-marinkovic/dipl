@@ -240,7 +240,7 @@ static void WrapReportTestResult(bool result) {
       PrintBinary(the_current_perm_log, the_instrumented_instrs.count * 2);
       dr_printf(") (hex permutation: 0x%x)\n", the_current_perm_log);
 
-      dr_abort();
+      //dr_abort();
     }
   }
 

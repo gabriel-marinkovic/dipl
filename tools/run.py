@@ -262,7 +262,7 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
 DYNAMORIO_DIR = "DynamoRIO"
 DYNAMORIO_CLIENTS_DIR = "build/src"
 COLLECT_DIR = "collect"
-APP_UNDER_TEST = "build/example/stack_naive"
+APP_UNDER_TEST = "build/example/lockfree/spsc_queue"
 
 print("Deleting", COLLECT_DIR, "...")
 shutil.rmtree(COLLECT_DIR, ignore_errors=True)
