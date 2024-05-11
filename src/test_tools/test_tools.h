@@ -7,7 +7,7 @@
 
 volatile bool prevent_optimization_literal_bool_false = false;
 volatile int prevent_optimization_literal_int_minus_one = -1;
-volatile bool prevent_optimization_sink_bool = false;
+volatile bool prevent_optimization_sink_bool;
 
 extern "C" {
 
@@ -24,12 +24,12 @@ void TEST_TOOL_FUNCTION InstrumentationResume() {
   FN_PRELUDE;
 }
 
-//static std::barrier barrier(2);
+static std::barrier barrier(2);
 void TEST_TOOL_FUNCTION InstrumentingWaitForAll() {
   FN_PRELUDE;
   if (!Instrumenting()) return;
   InstrumentationPause();
-  //barrier.arrive_and_wait();
+  barrier.arrive_and_wait();
   InstrumentationResume();
 }
 

@@ -255,13 +255,17 @@ static int WrapThreadIdx() {
 }
 
 static void WrapMustAlways(bool result) {
+  void* drcontext = dr_get_current_drcontext();
   if (result) {
     dr_atomic_add32_return_sum(&the_threads_successful, 1);
   }
+  drwrap_replace_native_fini(drcontext);
 }
 
 static void WrapMustAtleastOnce(bool result) {
+  void* drcontext = dr_get_current_drcontext();
   DR_ASSERT(false && "not implemented!");
+  drwrap_replace_native_fini(drcontext);
 }
 
 static bool WakeNextThread(ThreadData* thread, bool go_to_sleep) {

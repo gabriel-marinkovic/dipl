@@ -249,7 +249,7 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
 
         out, err = run_command(
             "addr2line", "-Cafipe", module.path, f"0x{preferred_address:x}",
-            silent=True, silent_errors=True,
+            silent=False, silent_errors=False,
         )
         addr2line = (out + err).strip()
         instrumented.append(InstructionToInstrument(module=module, name=name, offset=offset, addr2line_output=addr2line))
@@ -262,7 +262,7 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
 DYNAMORIO_DIR = "DynamoRIO"
 DYNAMORIO_CLIENTS_DIR = "build/src"
 COLLECT_DIR = "collect"
-APP_UNDER_TEST = "build/example/basic"
+APP_UNDER_TEST = "build/example/stack_lockfree"
 
 print("Deleting", COLLECT_DIR, "...")
 shutil.rmtree(COLLECT_DIR, ignore_errors=True)

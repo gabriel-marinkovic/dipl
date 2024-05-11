@@ -20,6 +20,7 @@ void producer(QueueT& q) {
     done_producing.store(true, std::memory_order_release);
 
     MustAlways(ok);
+    RunDone();
   }
 }
 
@@ -35,7 +36,9 @@ void consumer(QueueT& q) {
     uint32_t value = 0xbeef;
     bool read = q.Pop(value);
     bool ok = (read && value == 12345) || (!done && !read);
+
     MustAlways(ok);
+    RunDone();
   }
 }
 

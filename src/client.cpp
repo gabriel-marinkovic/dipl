@@ -136,6 +136,17 @@ static bool WrapNextRun() {
   return !was_instrumenting;
 }
 
+static void WrapRunDone() {
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+
+  dr_printf("Hello from WrapRunDone!\n");
+
+  DR_ASSERT(IS_INSTRUMENTING(data->seg_base));
+  IS_INSTRUMENTING(data->seg_base) = 0;
+  drwrap_replace_native_fini(drcontext);
+}
+
 static int WrapThreadIdx() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
@@ -479,7 +490,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   replace_native("InstrumentationResume", WrapInstrumentationResume);
   // `InstrumentingWaitForAll` in userspace.
   replace_native("NextRun", WrapNextRun);
-  // `WrapRunDone` already noop.
+  replace_native("RunDone", WrapRunDone);
   replace_native("ThreadIdx", WrapThreadIdx);
   // `MustAlways` already noop.
   // `MustAtleastOnce` already noop.
