@@ -16,13 +16,9 @@ bool TEST_TOOL_FUNCTION Instrumenting() {
   return prevent_optimization_literal_bool_false;
 }
 
-void TEST_TOOL_FUNCTION InstrumentationPause() {
-  FN_PRELUDE;
-}
+void TEST_TOOL_FUNCTION InstrumentationPause() { FN_PRELUDE; }
 
-void TEST_TOOL_FUNCTION InstrumentationResume() {
-  FN_PRELUDE;
-}
+void TEST_TOOL_FUNCTION InstrumentationResume() { FN_PRELUDE; }
 
 static std::barrier barrier(2);
 void TEST_TOOL_FUNCTION InstrumentingWaitForAll() {
@@ -38,9 +34,7 @@ bool TEST_TOOL_FUNCTION NextRun() {
   return prevent_optimization_literal_bool_false;
 }
 
-void TEST_TOOL_FUNCTION RunDone() {
-  FN_PRELUDE;
-}
+void TEST_TOOL_FUNCTION RunDone() { FN_PRELUDE; }
 
 int TEST_TOOL_FUNCTION ThreadIdx() {
   FN_PRELUDE;
@@ -57,5 +51,10 @@ void TEST_TOOL_FUNCTION MustAtleastOnce(bool ok) {
   prevent_optimization_sink_bool = ok;
 }
 
+#define NO_INSTR(code)       \
+  do {                       \
+    InstrumentationPause();  \
+    code;                    \
+    InstrumentationResume(); \
+  } while (0)
 }
-

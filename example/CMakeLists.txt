@@ -5,6 +5,7 @@ include_directories("../src/test_tools")
 add_subdirectory(lockfree)
 
 add_executable(basic basic.cpp)
+add_executable(basic_passing basic_passing.cpp)
 add_executable(double_checked_locking double_checked_locking.cpp)
 add_executable(mutex mutex.cpp)
 add_executable(fairlock fairlock.cpp)
