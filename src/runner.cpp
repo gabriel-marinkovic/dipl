@@ -240,7 +240,7 @@ static void WrapRunDone() {
       PrintBinary(the_current_perm_log, the_instrumented_instrs.count * 2);
       dr_printf(") (hex permutation: 0x%x)\n", the_current_perm_log);
 
-      //dr_abort();
+      dr_abort();
     }
   }
 
@@ -574,7 +574,11 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   // Initialize global permutation state.
   {
     if (got_permutation) {
-      dr_printf("Using explicit permutation: 0x%016llx\n", permutation);
+      dr_printf("\nUsing explicit permutation: 0b", permutation);
+      PrintBinary(perm_as_delta(permutation), the_instrumented_instrs.count * 2);
+      dr_printf(" (0b");
+      PrintBinary(permutation, the_instrumented_instrs.count * 2);
+      dr_printf(") (hex permutation: 0x%x)\n", permutation);
     }
     if (got_permutation) {
       the_first_perm = permutation;
