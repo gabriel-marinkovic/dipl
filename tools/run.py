@@ -1,9 +1,12 @@
 import collections
 import dataclasses
 import os
+import psutil
 import shutil
 import struct
 import subprocess
+import threading
+import time
 from typing import DefaultDict, Dict, FrozenSet, List, Set, Tuple
 
 
@@ -284,6 +287,9 @@ DYNAMORIO_CLIENTS_DIR = "build/src"
 COLLECT_DIR = "collect"
 APP_UNDER_TEST = "build/example/lockfree/spsc_queue"
 
+INSTRUCTIONS_PATH = os.path.join(COLLECT_DIR, "instructions.bin")
+EXIT_PATH = os.path.join(COLLECT_DIR, "deadlock")
+
 print("Deleting", COLLECT_DIR, "...")
 shutil.rmtree(COLLECT_DIR, ignore_errors=True)
 os.makedirs(COLLECT_DIR)
@@ -299,7 +305,6 @@ run_command(
 print("Determining instructions...")
 instrumented = get_instructions_to_instrument(COLLECT_DIR)
 
-INSTRUCTIONS_PATH = os.path.join(COLLECT_DIR, "instructions.bin")
 print("Creating", INSTRUCTIONS_PATH, "...")
 with open(INSTRUCTIONS_PATH, "wb") as f:
     write_packed_int64(f, len(instrumented))
@@ -313,19 +318,42 @@ with open(INSTRUCTIONS_PATH, "wb") as f:
 print("Instrumented instruction count:", len(instrumented))
 #exit(0)
 
+# Run the tests and periodically check if `EXIT_PATH` exists, in which case terminate the process.
 print("Running tests...")
-#run_command(
-#    os.path.join(DYNAMORIO_DIR, "bin64/drrun"),
-#    "-c", os.path.join(DYNAMORIO_CLIENTS_DIR, "librunner.so"), "-instructions_file", INSTRUCTIONS_PATH,
-#    "--", APP_UNDER_TEST,
-#    silent_errors=True,
-#)
 cmds = [
     os.path.join(DYNAMORIO_DIR, "bin64/drrun"),
-    "-c", os.path.join(DYNAMORIO_CLIENTS_DIR, "librunner.so"), "--instructions_file", INSTRUCTIONS_PATH,
+    "-opt_cleancall", "2",
+    "-opt_speed",
+    "-c", os.path.join(DYNAMORIO_CLIENTS_DIR, "librunner.so"),
+    "--instructions_file", INSTRUCTIONS_PATH,
+    "--exit_file", EXIT_PATH,
     "--", APP_UNDER_TEST,
 ]
-subprocess.run(cmds)
+
+def check_deadlock(proc):
+    while True:
+        time.sleep(1)
+        if not os.path.exists(EXIT_PATH):
+            continue
+        try:
+            parent = psutil.Process(proc.pid)
+            for child in parent.children(recursive=True):
+                try:
+                    child.kill()
+                except psutil.NoSuchProcess:
+                    pass
+            parent.kill()
+        except psutil.NoSuchProcess:
+            pass
+        return
+
+with subprocess.Popen(cmds, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+    threading.Thread(target=check_deadlock, args=(proc,), daemon=True).start()
+    for line in proc.stdout:
+        print(line, end="")
+    for line in proc.stderr:
+        print(line, end="")
+    proc.wait()
 
 print("All done!")
 print(" ".join(cmds))

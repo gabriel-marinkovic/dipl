@@ -124,14 +124,39 @@ static int volatile the_done;
 static int volatile the_threads_waiting;
 static int volatile the_threads_running;
 static int volatile the_threads_successful;
+static int volatile the_threads_successful_atleast_once = 1;
 
 static uint64_t the_first_perm;
 static uint64_t the_last_perm;
 static uint64_t the_current_perm;
 static uint64_t the_switch_mask;
-static uint64_t the_current_perm_log;
-static uint64_t the_switch_mask_log;
+
+static uint64_t volatile the_current_perm_log;
+static uint64_t volatile the_switch_mask_log;
 static uint64_t the_total_perm_count_log;
+static uint64_t the_start_time_ms;
+static uint64_t volatile the_last_run_completed_time_ms;
+
+static const char* the_exit_path;
+
+static void BestEffortAbort() {
+  if (the_exit_path) {
+    file_t df = dr_open_file(the_exit_path, DR_FILE_WRITE_REQUIRE_NEW);
+    DR_ASSERT(df != INVALID_FILE);
+    dr_close_file(df);
+  }
+  dr_abort();
+}
+
+static inline uint64_t atomic_load_u64(uint64_t volatile* x) {
+  int64_t volatile * ptr = reinterpret_cast<int64_t volatile*>(x);
+  int64_t val = dr_atomic_load64(ptr);
+  return static_cast<uint64_t>(val);
+}
+static inline void atomic_store_u64(uint64_t volatile* x, uint64_t val) {
+  int64_t volatile * ptr = reinterpret_cast<int64_t volatile*>(x);
+  dr_atomic_store64(ptr, static_cast<int64_t>(val));
+}
 
 static void WrapInstrumentingWaitForAll() {}
 
@@ -175,8 +200,8 @@ static bool WrapNextRun() {
 
     if (the_current_perm <= the_last_perm) {
       the_switch_mask = perm_as_delta(the_current_perm);
-      the_current_perm_log = the_current_perm;
-      the_switch_mask_log = the_switch_mask;
+      atomic_store_u64(&the_current_perm_log, the_current_perm);
+      atomic_store_u64(&the_switch_mask_log, the_switch_mask);
       the_current_perm = next_perm(the_current_perm);
 
       // dr_printf("Using mask 0b");
@@ -192,6 +217,11 @@ static bool WrapNextRun() {
         DR_ASSERT(other);
         DR_ASSERT(dr_atomic_load32(&other->running));
         dr_event_signal(other->event);
+      }
+
+      if (!dr_atomic_load32(&the_threads_successful_atleast_once)) {
+        dr_printf("`MustAtleastOnce` was never true!\n");
+        BestEffortAbort();
       }
     }
   }
@@ -251,12 +281,28 @@ static void WrapRunDone() {
       PrintBinary(the_current_perm_log, the_instrumented_instrs.count * 2);
       dr_printf(") (hex permutation: 0x%x)\n", the_current_perm_log);
 
-      dr_abort();
+      BestEffortAbort();
     }
 
     if (the_total_run_count % (the_total_perm_count_log / 128) == 0) {
-      float percent = 100.0f * the_total_run_count / the_total_perm_count_log;
-      dr_printf("Completed %.1f%% of all runs.\n", percent);
+      float percent = (float)the_total_run_count / (float)the_total_perm_count_log;
+      float percent100 = 100.0f * percent;
+
+      uint64_t t = dr_get_milliseconds();
+      atomic_store_u64(&the_last_run_completed_time_ms, t);
+      uint64_t elapsed_ms = t - the_start_time_ms;
+      uint64_t estimated_total_ms = (uint64_t)((float)elapsed_ms / percent);
+
+      uint64_t total_seconds = (estimated_total_ms - elapsed_ms) / 1000;
+      uint64_t d = total_seconds / (3600 * 24);
+      total_seconds %= (3600 * 24);
+      uint64_t h = total_seconds / 3600;
+      total_seconds %= 3600;
+      uint64_t m = total_seconds / 60;
+      uint64_t s = total_seconds % 60;
+
+      dr_printf("Completed %.1f%% of all runs. Estimated time remaining: %llu days and %02llu:%02llu:%02llu\n",
+                percent100, d, h, m, s);
     }
   }
 
@@ -280,7 +326,7 @@ static void WrapMustAlways(bool result) {
 
 static void WrapMustAtleastOnce(bool result) {
   void* drcontext = dr_get_current_drcontext();
-  DR_ASSERT(false && "not implemented!");
+  dr_atomic_store32(&the_threads_successful_atleast_once, result ? 1 : 0);
   drwrap_replace_native_fini(drcontext);
 }
 
@@ -298,21 +344,21 @@ static bool WakeNextThread(ThreadData* thread, bool go_to_sleep) {
     }
 
     if (go_to_sleep) {
-      //dr_printf("sleeping in context switch point: %d (%d)\n", thread->thread_idx, thread->thread_id);
+      // dr_printf("sleeping in context switch point: %d (%d)\n", thread->thread_idx, thread->thread_id);
     }
     DR_ASSERT(thread->event);
     dr_event_signal(other->event);
     if (go_to_sleep) {
       dr_event_wait(thread->event);
       dr_event_reset(thread->event);
-      //dr_printf("WAKING in context switch point: %d\n", thread->thread_idx);
+      // dr_printf("WAKING in context switch point: %d\n", thread->thread_idx);
     }
     return true;
   }
 
   if (first_running_and_sleeping_idx) {
-    //dr_printf("FAILED TO WAKE, but there was a running thread which was sleeping: %d. Deadlock?\n",
-    //          first_running_and_sleeping_idx->thread_idx);
+    // dr_printf("FAILED TO WAKE, but there was a running thread which was sleeping: %d. Deadlock?\n",
+    //           first_running_and_sleeping_idx->thread_idx);
   }
   return false;
 }
@@ -327,12 +373,12 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
   bool should_switch = the_switch_mask & 1;
   the_switch_mask >>= 1;
 
-  //dr_printf("%p In context switch point: %d\n", instr_addr_relative, data->thread_idx);
+  // dr_printf("%p In context switch point: %d\n", instr_addr_relative, data->thread_idx);
 
   for (InstrumentedInstruction& instr : the_instrumented_instrs) {
     if (instr.adddr_relative != instr_addr_relative) continue;
     if (!instr.is_syscall) continue;
-    //dr_printf("    Context switch point is syscall, and we ate %d\n", should_switch);
+    // dr_printf("    Context switch point is syscall, and we ate %d\n", should_switch);
     break;
   }
 
@@ -341,7 +387,7 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
     // DR_ASSERT(woke_someone);
   }
 
-  //dr_printf("LEAVING context switch point: %d\n", data->thread_idx);
+  // dr_printf("LEAVING context switch point: %d\n", data->thread_idx);
 }
 
 static bool event_pre_syscall(void* drcontext, int sysnum) {
@@ -421,8 +467,7 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
     if (!instr.addr_absolute) continue;
     if (instr.addr_absolute != instr_addr) continue;
 
-    // RECONSIDER: save fp state?
-    dr_insert_clean_call(drcontext, bb, where, (void*)ContextSwitchPoint, true, 1,
+    dr_insert_clean_call(drcontext, bb, where, (void*)ContextSwitchPoint, false, 1,
                          OPND_CREATE_INTPTR(instr.adddr_relative));
     break;
   }
@@ -525,12 +570,16 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   // clang-format off
   static struct option long_options[] = {
       {"instructions_file", required_argument, 0, 'i'},
+      {"exit_file",         required_argument, 0, 'e'},
       {"permutation",       required_argument, 0, 'p'},
       {0, 0, 0, 0}
   };
   // clang-format on
   while ((opt = getopt_long(argc, (char**)argv, "i:p:", long_options, NULL)) != -1) {
     switch (opt) {
+      case 'e':
+        the_exit_path = optarg;
+        break;
       case 'i':
         instr_path = optarg;
         break;
@@ -547,6 +596,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   }
 
   DR_ASSERT(instr_path);
+  DR_ASSERT(the_exit_path);
   dr_printf("Instructions file: %s\n", instr_path);
 
   // Initialize `the_instrumented_instrs` from path given in `argv`.
@@ -681,4 +731,23 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   if (!dr_raw_tls_calloc(&tls_seg, &tls_offs, TLS_OFFSET__COUNT, alignof(void*))) DR_ASSERT(false);
 
   dr_log(NULL, DR_LOG_ALL, 1, "Client 'runner' initializing\n");
+
+  // Deadlock detecting thread.
+  the_start_time_ms = dr_get_milliseconds();
+  atomic_store_u64(&the_last_run_completed_time_ms, the_start_time_ms);
+
+  bool ok = dr_create_client_thread(
+      [](void*) {
+        while (true) {
+          uint64_t before = atomic_load_u64(&the_last_run_completed_time_ms);
+          dr_sleep(60 * 1000);
+          uint64_t after = atomic_load_u64(&the_last_run_completed_time_ms);
+          if (after <= before) {
+            uint64_t perm = atomic_load_u64(&the_current_perm_log);
+            dr_printf("!!! DEADLOCK DETECTED !!! For permutation: 0x%llx\n", perm);
+            BestEffortAbort();
+          }
+        }
+      },
+      NULL);
 }
