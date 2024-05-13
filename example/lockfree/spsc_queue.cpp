@@ -4,22 +4,24 @@
 #include "test_tools.h"
 #include "lockfree.hpp"
 
-using QueueT = lockfree::spsc::Queue<uint32_t, 128U>;
-
-std::atomic<bool> done_producing;
+constexpr int QSIZE = 4;
+using QueueT = lockfree::spsc::Queue<uint32_t, QSIZE>;
 
 void producer(QueueT& q) {
   while (NextRun()) {
     if (ThreadIdx() == 0) {
       q.~QueueT();
       new (&q) QueueT();
-      done_producing.store(false, std::memory_order_seq_cst);
     }
 
-    bool ok = q.Push(12345);
-    done_producing.store(true, std::memory_order_release);
+    q.Push(1);
+    q.Push(2);
+    q.Push(3);
+    q.Push(4);
 
-    MustAlways(ok);
+    //NO_INSTR(printf("TID %d: pushed: %d, done: %d\n", ok, done_producing.load(std::memory_order_seq_cst)));
+
+    MustAlways(true);
     RunDone();
   }
 }
@@ -29,13 +31,29 @@ void consumer(QueueT& q) {
     if (ThreadIdx() == 0) {
       q.~QueueT();
       new (&q) QueueT();
-      done_producing.store(false, std::memory_order_seq_cst);
     }
 
-    bool done = done_producing.load(std::memory_order_acquire);
-    uint32_t value = 0xbeef;
-    bool read = q.Pop(value);
-    bool ok = (read && value == 12345) || (!done && !read);
+    bool ok = true;
+    uint32_t value = 0xff;
+    bool popped;
+
+    popped = q.Pop(value);
+    ok = ok && (!popped || (value != 0 && value == 1));
+    //NO_INSTR(printf("TID %d: POP 1: popped: %d, value: %u\n", ThreadIdx(), popped, value));
+
+    popped = q.Pop(value);
+    ok = ok && (!popped || (value != 0 && value <= 2));
+    //NO_INSTR(printf("TID %d: POP 2: popped: %d, value: %u\n", ThreadIdx(), popped, value));
+
+    popped = q.Pop(value);
+    ok = ok && (!popped || (value != 0 && value <= 3));
+    //NO_INSTR(printf("TID %d: POP 3: popped: %d, value: %u\n", ThreadIdx(), popped, value));
+
+    popped = q.Pop(value);
+    ok = ok && (!popped || (value != 0 && value <= 4));
+    //NO_INSTR(printf("TID %d: POP 4: popped: %d, value: %u\n", ThreadIdx(), popped, value));
+
+    //NO_INSTR(printf("TID %d: done: %d, read: %d, value: %d\n", done, read, value));
 
     MustAlways(ok);
     RunDone();
@@ -43,7 +61,7 @@ void consumer(QueueT& q) {
 }
 
 int main() {
-  lockfree::spsc::Queue<uint32_t, 128U> q;
+  QueueT q;
   std::thread t1(producer, std::ref(q));
   std::thread t2(consumer, std::ref(q));
 

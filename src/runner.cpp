@@ -39,6 +39,16 @@ void PrintBinary(uint64_t n, uint64_t total_length) {
   }
 }
 
+uint64_t calculate_choose(uint64_t n, uint64_t k) {
+  DR_ASSERT(n <= 64);
+  uint64_t solutions[64] = {};
+  solutions[0] = n - k + 1;
+  for (uint64_t i = 1; i < k; ++i) {
+    solutions[i] = solutions[i - 1] * (n - k + 1 + i) / (i + 1);
+  }
+  return solutions[k - 1];
+}
+
 // http://graphics.stanford.edu/~seander/bithacks.html
 static inline uint64_t first_perm(uint64_t n, uint64_t c) { return (1 << c) - 1; }
 static inline uint64_t last_perm(uint64_t n, uint64_t c) { return (1 << n) - (1 << (n - c)); }
@@ -103,8 +113,8 @@ static void insert_set_is_instrumenting(void* drcontext, instrlist_t* ilist, ins
                           scratch);
 }
 
-static int total_runs;
-static int total_successes;
+static uint64_t the_successful_run_count;
+static uint64_t the_total_run_count;
 
 // TODO: This currently assumes that we will have exactly 2 threads (not more OR less).
 static int volatile the_next_thread_idx;
@@ -121,6 +131,7 @@ static uint64_t the_current_perm;
 static uint64_t the_switch_mask;
 static uint64_t the_current_perm_log;
 static uint64_t the_switch_mask_log;
+static uint64_t the_total_perm_count_log;
 
 static void WrapInstrumentingWaitForAll() {}
 
@@ -228,8 +239,8 @@ static void WrapRunDone() {
     int successes = dr_atomic_load32(&the_threads_successful);
     dr_atomic_store32(&the_threads_successful, 0);
     bool all_successful = (successes == ArrayCount(the_threads));
-    if (all_successful) ++total_successes;
-    ++total_runs;
+    if (all_successful) ++the_successful_run_count;
+    ++the_total_run_count;
 
     if (!all_successful) {
       const char* prefix = all_successful ? ":) :)" : "!!!!!";
@@ -241,6 +252,11 @@ static void WrapRunDone() {
       dr_printf(") (hex permutation: 0x%x)\n", the_current_perm_log);
 
       dr_abort();
+    }
+
+    if (the_total_run_count % (the_total_perm_count_log / 128) == 0) {
+      float percent = 100.0f * the_total_run_count / the_total_perm_count_log;
+      dr_printf("Completed %.1f%% of all runs.\n", percent);
     }
   }
 
@@ -282,21 +298,21 @@ static bool WakeNextThread(ThreadData* thread, bool go_to_sleep) {
     }
 
     if (go_to_sleep) {
-      dr_printf("sleeping in context switch point: %d (%d)\n", thread->thread_idx, thread->thread_id);
+      //dr_printf("sleeping in context switch point: %d (%d)\n", thread->thread_idx, thread->thread_id);
     }
     DR_ASSERT(thread->event);
     dr_event_signal(other->event);
     if (go_to_sleep) {
       dr_event_wait(thread->event);
       dr_event_reset(thread->event);
-      dr_printf("WAKING in context switch point: %d\n", thread->thread_idx);
+      //dr_printf("WAKING in context switch point: %d\n", thread->thread_idx);
     }
     return true;
   }
 
   if (first_running_and_sleeping_idx) {
-    dr_printf("FAILED TO WAKE, but there was a running thread which was sleeping: %d. Deadlock?\n",
-              first_running_and_sleeping_idx->thread_idx);
+    //dr_printf("FAILED TO WAKE, but there was a running thread which was sleeping: %d. Deadlock?\n",
+    //          first_running_and_sleeping_idx->thread_idx);
   }
   return false;
 }
@@ -311,12 +327,12 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
   bool should_switch = the_switch_mask & 1;
   the_switch_mask >>= 1;
 
-  dr_printf("%p In context switch point: %d\n", instr_addr_relative, data->thread_idx);
+  //dr_printf("%p In context switch point: %d\n", instr_addr_relative, data->thread_idx);
 
   for (InstrumentedInstruction& instr : the_instrumented_instrs) {
     if (instr.adddr_relative != instr_addr_relative) continue;
     if (!instr.is_syscall) continue;
-    dr_printf("    Context switch point is syscall, and we ate %d\n", should_switch);
+    //dr_printf("    Context switch point is syscall, and we ate %d\n", should_switch);
     break;
   }
 
@@ -325,7 +341,7 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
     // DR_ASSERT(woke_someone);
   }
 
-  dr_printf("LEAVING context switch point: %d\n", data->thread_idx);
+  //dr_printf("LEAVING context switch point: %d\n", data->thread_idx);
 }
 
 static bool event_pre_syscall(void* drcontext, int sysnum) {
@@ -466,7 +482,7 @@ static void event_thread_exit(void* drcontext) {
 }
 
 static void event_exit(void) {
-  dr_printf("\n\nTOTAL SUCCESSES: %d / %d\n", total_successes, total_runs);
+  dr_printf("\n\nTOTAL SUCCESSES: %llu / %llu\n", the_successful_run_count, the_total_run_count);
 
   for (auto& instr : the_instrumented_instrs) {
     DrThreadFreeArray(NULL, &instr.path);
@@ -610,6 +626,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
     } else {
       the_first_perm = first_perm(total_access_count, thread0_access_count);
       the_last_perm = last_perm(total_access_count, thread0_access_count);
+      the_total_perm_count_log = calculate_choose(total_access_count, thread0_access_count);
     }
     the_current_perm = the_first_perm;
     the_current_perm_log = the_first_perm;
