@@ -9,6 +9,8 @@ using QueueT = lockfree::spsc::Queue<uint32_t, QSIZE>;
 
 void producer(QueueT& q) {
   while (NextRun()) {
+    ContiguousMemoryHint(&q, sizeof(q));
+
     if (ThreadIdx() == 0) {
       q.~QueueT();
       new (&q) QueueT();
@@ -56,6 +58,7 @@ void consumer(QueueT& q) {
     //NO_INSTR(printf("TID %d: done: %d, read: %d, value: %d\n", done, read, value));
 
     MustAlways(ok);
+    MustAtleastOnce(popped && value == 4);
     RunDone();
   }
 }

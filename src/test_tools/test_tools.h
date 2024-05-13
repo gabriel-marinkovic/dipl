@@ -8,6 +8,8 @@
 volatile bool prevent_optimization_literal_bool_false = false;
 volatile int prevent_optimization_literal_int_minus_one = -1;
 volatile bool prevent_optimization_sink_bool;
+volatile int prevent_optimization_sink_int;
+volatile void* prevent_optimization_sink_voidptr;
 
 extern "C" {
 
@@ -49,6 +51,12 @@ void TEST_TOOL_FUNCTION MustAlways(bool ok) {
 void TEST_TOOL_FUNCTION MustAtleastOnce(bool ok) {
   FN_PRELUDE;
   prevent_optimization_sink_bool = ok;
+}
+
+void TEST_TOOL_FUNCTION ContiguousMemoryHint(void* ptr, int size) {
+  FN_PRELUDE;
+  prevent_optimization_sink_voidptr = ptr;
+  prevent_optimization_sink_int = size;
 }
 
 #define NO_INSTR(code)       \

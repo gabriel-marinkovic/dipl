@@ -51,6 +51,7 @@ using namespace app;
 enum MemoryReferenceKind : uint16_t {
   REF_KIND_READ = 0,
   REF_KIND_WRITE = 1,
+  REF_KIND_MEMORY_HINT = 2,
 };
 
 struct MemoryReference {
@@ -154,6 +155,24 @@ static int WrapThreadIdx() {
   return data->thread_idx;
 }
 
+static void WrapContiguousMemoryHint(void* ptr, int size) {
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+
+  dr_printf("Hello from WrapContiguousMemoryHint!\n");
+
+  // TODO: Lame assert.
+  DR_ASSERT(size <= 65535);
+
+  // TODO: We assume that we have enough space in buf ptr, and we probably do, but check this better.
+  MemoryReference* current = BUF_PTR(data->seg_base);
+  current->type = REF_KIND_MEMORY_HINT;
+  current->size = static_cast<uint16_t>(size);
+  current->addr = reinterpret_cast<app_pc>(ptr);
+  BUF_PTR(data->seg_base) = current + 1;
+  drwrap_replace_native_fini(drcontext);
+}
+
 static void memtrace(void* drcontext) {
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   MemoryReference* buf_ptr = BUF_PTR(data->seg_base);
@@ -162,7 +181,7 @@ static void memtrace(void* drcontext) {
     data->writer.WriteUint16LE(mem_ref->type);
     data->writer.WriteUint16LE(mem_ref->size);
     data->writer.WriteUint64LE(reinterpret_cast<uint64_t>(reinterpret_cast<uintptr_t>(mem_ref->addr)));
-    if (mem_ref->type != REF_KIND_READ && mem_ref->type != REF_KIND_WRITE) {
+    if (mem_ref->type != REF_KIND_READ && mem_ref->type != REF_KIND_WRITE && mem_ref->type != REF_KIND_MEMORY_HINT) {
       data->writer.WriteString(Wrap(decode_opcode_name(mem_ref->type)));
     } else {
       data->writer.WriteUint64LE(0);
@@ -494,6 +513,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   replace_native("ThreadIdx", WrapThreadIdx);
   // `MustAlways` already noop.
   // `MustAtleastOnce` already noop.
+  replace_native("ContiguousMemoryHint", WrapContiguousMemoryHint);
 
   dr_free_module_data(main_module);
 
