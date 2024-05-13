@@ -4,7 +4,7 @@ import os
 import shutil
 import struct
 import subprocess
-from typing import Dict, FrozenSet, List, Set, Tuple
+from typing import DefaultDict, Dict, FrozenSet, List, Set, Tuple
 
 
 def run_command(command_name, *args, silent=False, silent_errors=False):
@@ -108,6 +108,8 @@ class InstructionToInstrument:
     module: Module
     name: str
     offset: int
+    access_count1: int
+    access_count2: int
     addr2line_output: str
 
     def runtime_address(self) -> int:
@@ -149,7 +151,7 @@ def parse_modules(directory) -> Tuple[Module]:
 
 
 def process_file(
-    thread_idxs_from_instr: Dict[Instruction, Set[int]],
+    thread_idxs_from_instr: DefaultDict[Instruction, List[int]],
     thread_accesses: Set[ThreadAccess],
     thread_idx: int,
     file_path: str,
@@ -162,9 +164,9 @@ def process_file(
             return
         frozen = instr.frozen()
         for op in frozen.src_ops + frozen.dst_ops:
-            thread_idxs_from_instr[frozen].add((thread_idx, op.is_read))
+            thread_idxs_from_instr[frozen].append(thread_idx)
         if frozen.name == "syscall":
-            thread_idxs_from_instr[frozen].add((thread_idx, False))
+            thread_idxs_from_instr[frozen].append(thread_idx)
         thread_accesses.add(ThreadAccess(
             thread_idx=thread_idx,
             instr_addr=frozen.address,
@@ -207,17 +209,21 @@ def process_file(
 def get_instructions_to_instrument(collect_directory: str) -> List[InstructionToInstrument]:
     modules = parse_modules(collect_directory)
 
-    thread_idxs_from_instr: Dict[Instruction, Set[Tuple[int, bool]]] = collections.defaultdict(set)
+    thread_idxs_from_instr: DefaultDict[Instruction, List[int]] = collections.defaultdict(list)
     thread_accesses: Set[ThreadAccess] = set()
-    for thread_idx, filename in enumerate(os.listdir(collect_directory)):
+    thread_idx = 0
+    for filename in os.listdir(collect_directory):
         if not filename.endswith(".bin"):
             continue
         file_path = os.path.join(collect_directory, filename)
         file_size = os.path.getsize(file_path)
+        if file_size == 0:
+            continue
         if file_size > 1024**2:
-            #print("skipping", filename, "cause too large:", file_size / 1024**2, "MB")
+            print("skipping", filename, "cause too large:", file_size / 1024**2, "MB")
             continue
         process_file(thread_idxs_from_instr, thread_accesses, thread_idx, file_path)
+        thread_idx += 1
 
     shared_memory = set()
     for a1 in thread_accesses:
@@ -230,6 +236,13 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
     for instr in thread_idxs_from_instr.keys():
         if (instr.addresses_touched & shared_memory) or instr.name == "syscall":
             truly_shared_instruction_addresses.add((instr.address, instr.name))
+
+    access_count_per_instruction_address = {}
+    for instr, thread_idxs in thread_idxs_from_instr.items():
+        counter = collections.Counter(thread_idxs)
+        print(counter)
+        assert any(thread_idx in counter for thread_idx in [0, 1]) and "2 thread limit"
+        access_count_per_instruction_address[instr.address] = counter
 
     instrumented = []
     for addr, name in sorted(truly_shared_instruction_addresses):
@@ -249,12 +262,19 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
 
         out, err = run_command(
             "addr2line", "-Cafipe", module.path, f"0x{preferred_address:x}",
-            silent=False, silent_errors=False,
+            silent=True, silent_errors=True,
         )
         addr2line = (out + err).strip()
-        instrumented.append(InstructionToInstrument(module=module, name=name, offset=offset, addr2line_output=addr2line))
+        instrumented.append(InstructionToInstrument(
+            module=module,
+            name=name,
+            offset=offset,
+            access_count1=access_count_per_instruction_address[addr][0],
+            access_count2=access_count_per_instruction_address[addr][1],
+            addr2line_output=addr2line
+        ))
 
-        print("{: <64}{: <12}0x{:x}".format(module.path, name, offset))
+        print("{: <64}{: <12}0x{:x} ({} times)".format(module.path, name, offset, access_count_per_instruction_address[addr]))
 
     return instrumented
 
@@ -262,7 +282,7 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
 DYNAMORIO_DIR = "DynamoRIO"
 DYNAMORIO_CLIENTS_DIR = "build/src"
 COLLECT_DIR = "collect"
-APP_UNDER_TEST = "build/example/stack_lockfree"
+APP_UNDER_TEST = "build/example/lockfree/spsc_queue"
 
 print("Deleting", COLLECT_DIR, "...")
 shutil.rmtree(COLLECT_DIR, ignore_errors=True)
@@ -287,6 +307,8 @@ with open(INSTRUCTIONS_PATH, "wb") as f:
         write_packed_string(f, instr.module.path)
         write_packed_int64(f, instr.offset)
         write_packed_bool8(f, instr.name == "syscall")
+        write_packed_int64(f, instr.access_count1)
+        write_packed_int64(f, instr.access_count2)
 
 print("Instrumented instruction count:", len(instrumented))
 #exit(0)

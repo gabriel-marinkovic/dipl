@@ -72,6 +72,8 @@ struct InstrumentedInstruction {
   uintptr_t module_base;
   uintptr_t addr_absolute;
   bool is_syscall;
+  uint64_t access_count1;
+  uint64_t access_count2;
 };
 
 static Array<InstrumentedInstruction> the_instrumented_instrs;
@@ -120,9 +122,7 @@ static uint64_t the_switch_mask;
 static uint64_t the_current_perm_log;
 static uint64_t the_switch_mask_log;
 
-static void WrapInstrumentingWaitForAll() {
-
-}
+static void WrapInstrumentingWaitForAll() {}
 
 static bool WrapNextRun() {
   void* drcontext = dr_get_current_drcontext();
@@ -168,11 +168,11 @@ static bool WrapNextRun() {
       the_switch_mask_log = the_switch_mask;
       the_current_perm = next_perm(the_current_perm);
 
-      //dr_printf("Using mask 0b");
-      //PrintBinary(the_switch_mask_log, the_instrumented_instrs.count * 2);
-      //dr_printf(" (0b");
-      //PrintBinary(the_current_perm_log, the_instrumented_instrs.count * 2);
-      //dr_printf(")\n");
+      // dr_printf("Using mask 0b");
+      // PrintBinary(the_switch_mask_log, the_instrumented_instrs.count * 2);
+      // dr_printf(" (0b");
+      // PrintBinary(the_current_perm_log, the_instrumented_instrs.count * 2);
+      // dr_printf(")\n");
     } else {
       dr_atomic_store32(&the_done, 1);
 
@@ -282,21 +282,21 @@ static bool WakeNextThread(ThreadData* thread, bool go_to_sleep) {
     }
 
     if (go_to_sleep) {
-      // dr_printf("sleeping in context switch point: %d (%d)\n", thread->thread_idx, thread->thread_id);
+      dr_printf("sleeping in context switch point: %d (%d)\n", thread->thread_idx, thread->thread_id);
     }
     DR_ASSERT(thread->event);
     dr_event_signal(other->event);
     if (go_to_sleep) {
       dr_event_wait(thread->event);
       dr_event_reset(thread->event);
-      // dr_printf("WAKING in context switch point: %d\n", thread->thread_idx);
+      dr_printf("WAKING in context switch point: %d\n", thread->thread_idx);
     }
     return true;
   }
 
   if (first_running_and_sleeping_idx) {
-    // dr_printf("FAILED TO WAKE, but there was a running thread which was sleeping: %d. Deadlock?\n",
-    //           first_running_and_sleeping_idx->thread_idx);
+    dr_printf("FAILED TO WAKE, but there was a running thread which was sleeping: %d. Deadlock?\n",
+              first_running_and_sleeping_idx->thread_idx);
   }
   return false;
 }
@@ -311,12 +311,12 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
   bool should_switch = the_switch_mask & 1;
   the_switch_mask >>= 1;
 
-  // dr_printf("%p In context switch point: %d\n", instr_addr_relative, data->thread_idx);
+  dr_printf("%p In context switch point: %d\n", instr_addr_relative, data->thread_idx);
 
   for (InstrumentedInstruction& instr : the_instrumented_instrs) {
     if (instr.adddr_relative != instr_addr_relative) continue;
     if (!instr.is_syscall) continue;
-    // dr_printf("    Context switch point is syscall, and we ate %d\n", should_switch);
+    dr_printf("    Context switch point is syscall, and we ate %d\n", should_switch);
     break;
   }
 
@@ -325,7 +325,7 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
     // DR_ASSERT(woke_someone);
   }
 
-  // dr_printf("LEAVING context switch point: %d\n", data->thread_idx);
+  dr_printf("LEAVING context switch point: %d\n", data->thread_idx);
 }
 
 static bool event_pre_syscall(void* drcontext, int sysnum) {
@@ -564,8 +564,14 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
       DR_ASSERT(ok);
       the_instrumented_instrs[i].is_syscall = (is_syscall != 0);
 
-      dr_printf("Parsed instr %.*s, %d\n", StringArgs(the_instrumented_instrs[i].path),
-                the_instrumented_instrs[i].adddr_relative);
+      ok = instr_reader.ReadUint64LE(&the_instrumented_instrs[i].access_count1);
+      DR_ASSERT(ok);
+      ok = instr_reader.ReadUint64LE(&the_instrumented_instrs[i].access_count2);
+      DR_ASSERT(ok);
+
+      dr_printf("Parsed instr %.*s, %llu (access count: %llu, %llu)\n", StringArgs(the_instrumented_instrs[i].path),
+                the_instrumented_instrs[i].adddr_relative, the_instrumented_instrs[i].access_count1,
+                the_instrumented_instrs[i].access_count2);
     }
 
     instr_reader.Destroy();
@@ -573,6 +579,24 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
 
   // Initialize global permutation state.
   {
+    uint64_t thread0_access_count = 0;
+    uint64_t total_access_count = 0;
+    for (InstrumentedInstruction& instr : the_instrumented_instrs) {
+      int factor = (instr.is_syscall ? 2 : 1);
+      thread0_access_count += factor * instr.access_count1;
+      total_access_count += factor * (instr.access_count1 + instr.access_count2);
+    }
+
+    if (total_access_count < 1 || total_access_count > 64) {
+      dr_printf("Invalid instruction access count: %llu. Must be in range [1, 64].\n", total_access_count);
+      dr_abort();
+    }
+    if (thread0_access_count == 0 || thread0_access_count == total_access_count < 1) {
+      dr_printf("Invalid instruction access count for thread0: %llu (total count is %llu).\n", thread0_access_count,
+                total_access_count);
+      dr_abort();
+    }
+
     if (got_permutation) {
       dr_printf("\nUsing explicit permutation: 0b", permutation);
       PrintBinary(perm_as_delta(permutation), the_instrumented_instrs.count * 2);
@@ -584,13 +608,12 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
       the_first_perm = permutation;
       the_last_perm = permutation;
     } else {
-      the_first_perm = first_perm(the_instrumented_instrs.count * 2, the_instrumented_instrs.count);
-      the_last_perm = last_perm(the_instrumented_instrs.count * 2, the_instrumented_instrs.count);
+      the_first_perm = first_perm(total_access_count, thread0_access_count);
+      the_last_perm = last_perm(total_access_count, thread0_access_count);
     }
     the_current_perm = the_first_perm;
     the_current_perm_log = the_first_perm;
   }
-
 
   dr_register_exit_event(event_exit);
   dr_register_filter_syscall_event(event_filter_syscall);
