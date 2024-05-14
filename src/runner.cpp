@@ -149,12 +149,12 @@ static void BestEffortAbort() {
 }
 
 static inline uint64_t atomic_load_u64(uint64_t volatile* x) {
-  int64_t volatile * ptr = reinterpret_cast<int64_t volatile*>(x);
+  int64_t volatile* ptr = reinterpret_cast<int64_t volatile*>(x);
   int64_t val = dr_atomic_load64(ptr);
   return static_cast<uint64_t>(val);
 }
 static inline void atomic_store_u64(uint64_t volatile* x, uint64_t val) {
-  int64_t volatile * ptr = reinterpret_cast<int64_t volatile*>(x);
+  int64_t volatile* ptr = reinterpret_cast<int64_t volatile*>(x);
   dr_atomic_store64(ptr, static_cast<int64_t>(val));
 }
 
@@ -285,13 +285,15 @@ static void WrapRunDone() {
     }
 
     if (the_total_run_count % (the_total_perm_count_log / 128) == 0) {
-      float percent = (float)the_total_run_count / (float)the_total_perm_count_log;
-      float percent100 = 100.0f * percent;
+      // TODO: Investigate why using floating point operations (in particular printing, with either `printf` or
+      // `dr_printf`) crashes us with the `basic_passing` example.
+      // https://dynamorio.org/transparency.html#sec_trans_floating_point
+      uint64_t percent = (the_total_run_count * 100) / the_total_perm_count_log;
 
       uint64_t t = dr_get_milliseconds();
       atomic_store_u64(&the_last_run_completed_time_ms, t);
       uint64_t elapsed_ms = t - the_start_time_ms;
-      uint64_t estimated_total_ms = (uint64_t)((float)elapsed_ms / percent);
+      uint64_t estimated_total_ms = elapsed_ms * the_total_perm_count_log / the_total_run_count;
 
       uint64_t total_seconds = (estimated_total_ms - elapsed_ms) / 1000;
       uint64_t d = total_seconds / (3600 * 24);
@@ -301,8 +303,8 @@ static void WrapRunDone() {
       uint64_t m = total_seconds / 60;
       uint64_t s = total_seconds % 60;
 
-      dr_printf("Completed %.1f%% of all runs. Estimated time remaining: %llu days and %02llu:%02llu:%02llu\n",
-                percent100, d, h, m, s);
+      printf("Completed %lu%% of all runs. Estimated time remaining: %lu days and %02lu:%02lu:%02lu\n", percent, d, h,
+             m, s);
     }
   }
 
@@ -326,7 +328,7 @@ static void WrapMustAlways(bool result) {
 
 static void WrapMustAtleastOnce(bool result) {
   void* drcontext = dr_get_current_drcontext();
-  dr_atomic_store32(&the_threads_successful_atleast_once, result ? 1 : 0);
+  if (result) dr_atomic_store32(&the_threads_successful_atleast_once, 1);
   drwrap_replace_native_fini(drcontext);
 }
 

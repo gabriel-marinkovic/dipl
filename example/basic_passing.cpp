@@ -18,12 +18,13 @@ void test() {
     int tmp3 = x.load(std::memory_order_seq_cst);
 
     MustAlways(tmp3 >= 0);
+    //MustAtleastOnce(tmp3 == 0);
     RunDone();
   }
 }
 
 int main() {
-  std::cout << "HELLO FROM APP" << std::endl;
+  //std::cout << "HELLO FROM APP" << std::endl;
 
   std::thread t1(test);
   std::thread t2(test);

@@ -1,4 +1,4 @@
-add_compile_options(-g -ggdb -pthread -O0)
+add_compile_options(-g -ggdb -pthread -O2)
 
 include_directories("../src/test_tools")
 

@@ -65,4 +65,15 @@ void TEST_TOOL_FUNCTION ContiguousMemoryHint(void* ptr, int size) {
     code;                    \
     InstrumentationResume(); \
   } while (0)
+
+}
+
+template<typename T>
+thread_local volatile T volatile_t;
+
+template<typename T>
+T TEST_TOOL_FUNCTION PreventOpt(T x) {
+  FN_PRELUDE;
+  volatile_t<T> = x;
+  return volatile_t<T>;
 }

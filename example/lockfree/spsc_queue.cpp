@@ -16,10 +16,10 @@ void producer(QueueT& q) {
       new (&q) QueueT();
     }
 
-    q.Push(1);
-    q.Push(2);
-    q.Push(3);
-    q.Push(4);
+    q.Push(PreventOpt(1));
+    q.Push(PreventOpt(2));
+    q.Push(PreventOpt(3));
+    q.Push(PreventOpt(4));
 
     //NO_INSTR(printf("TID %d: pushed: %d, done: %d\n", ok, done_producing.load(std::memory_order_seq_cst)));
 
@@ -30,6 +30,8 @@ void producer(QueueT& q) {
 
 void consumer(QueueT& q) {
   while (NextRun()) {
+    ContiguousMemoryHint(&q, sizeof(q));
+
     if (ThreadIdx() == 0) {
       q.~QueueT();
       new (&q) QueueT();

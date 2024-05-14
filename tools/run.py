@@ -156,6 +156,7 @@ def parse_modules(directory) -> Tuple[Module]:
 def process_file(
     thread_idxs_from_instr: DefaultDict[Instruction, List[int]],
     thread_accesses: Set[ThreadAccess],
+    memory_hints: List[Set[int]],
     thread_idx: int,
     file_path: str,
 ):
@@ -188,7 +189,20 @@ def process_file(
             opcode, size, addr = struct.unpack(record_format, record_bytes)
             opcode_name = read_packed_string(file)
 
-            is_instruction = (opcode != 0 and opcode != 1)
+            if opcode == 2:
+                # Memory hint entry.
+                def f(memory_hints, addr, size):
+                    addrs = list(range(addr, addr + size))
+                    for addr in addrs:
+                        for block in memory_hints:
+                            if addr in block:
+                                block.update(addrs)
+                                return
+                    memory_hints.append(set(addrs))
+                f(memory_hints, addr, size)
+                continue
+
+            is_instruction = opcode > 2
             if is_instruction:
                 push_instr(instr)
                 instr = InstructionWIP(
@@ -214,6 +228,7 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
 
     thread_idxs_from_instr: DefaultDict[Instruction, List[int]] = collections.defaultdict(list)
     thread_accesses: Set[ThreadAccess] = set()
+    memory_hints: List[Set[int]] = []
     thread_idx = 0
     for filename in os.listdir(collect_directory):
         if not filename.endswith(".bin"):
@@ -225,25 +240,37 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
         if file_size > 1024**2:
             print("skipping", filename, "cause too large:", file_size / 1024**2, "MB")
             continue
-        process_file(thread_idxs_from_instr, thread_accesses, thread_idx, file_path)
+        process_file(thread_idxs_from_instr, thread_accesses, memory_hints, thread_idx, file_path)
         thread_idx += 1
+
+    def with_hints(hints, addrs):
+        new_addrs = addrs.copy()
+        for block in memory_hints:
+            if new_addrs & block:
+                new_addrs |= block
+        return new_addrs
 
     shared_memory = set()
     for a1 in thread_accesses:
         for a2 in thread_accesses:
             if a1.thread_idx == a2.thread_idx:
                 continue
-            mem_intersection = (a1.write_addrs & a2.read_addrs) | (a1.read_addrs & a2.write_addrs)
+            mem_intersection = (
+                (with_hints(memory_hints, a1.write_addrs) & with_hints(memory_hints, a2.read_addrs)) |
+                (with_hints(memory_hints, a2.write_addrs) & with_hints(memory_hints, a1.read_addrs))
+            )
             shared_memory.update(mem_intersection)
+    print(f"{len(shared_memory)=}")
+
     truly_shared_instruction_addresses = set()
     for instr in thread_idxs_from_instr.keys():
         if (instr.addresses_touched & shared_memory) or instr.name == "syscall":
             truly_shared_instruction_addresses.add((instr.address, instr.name))
+    print(f"{len(truly_shared_instruction_addresses)=}")
 
     access_count_per_instruction_address = {}
     for instr, thread_idxs in thread_idxs_from_instr.items():
         counter = collections.Counter(thread_idxs)
-        print(counter)
         assert any(thread_idx in counter for thread_idx in [0, 1]) and "2 thread limit"
         access_count_per_instruction_address[instr.address] = counter
 
