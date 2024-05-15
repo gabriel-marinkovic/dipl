@@ -15,8 +15,7 @@ void test() {
     x.fetch_add(1, std::memory_order_seq_cst);
     x.fetch_add(-1, std::memory_order_seq_cst);
 
-    int tmp3 = x.load(std::memory_order_seq_cst);
-
+    volatile int tmp3 = x.load(std::memory_order_seq_cst);
     MustAlways(tmp3 >= 0);
     MustAtleastOnce(0, tmp3 == 0);
     RunDone();
