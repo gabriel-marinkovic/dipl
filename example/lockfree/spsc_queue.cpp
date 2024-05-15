@@ -20,10 +20,12 @@ void producer(QueueT& q) {
     q.Push(PreventOpt(2));
     q.Push(PreventOpt(3));
     q.Push(PreventOpt(4));
-
-    //NO_INSTR(printf("TID %d: pushed: %d, done: %d\n", ok, done_producing.load(std::memory_order_seq_cst)));
+    bool pushed = q.Push(PreventOpt(5));
+    //NO_INSTR(printf("TID %d: pushed: %d\n", ThreadIdx(), pushed));
 
     MustAlways(true);
+    MustAtleastOnce(0, !pushed);
+    MustAtleastOnce(1, pushed);
     RunDone();
   }
 }
@@ -43,24 +45,18 @@ void consumer(QueueT& q) {
 
     popped = q.Pop(value);
     ok = ok && (!popped || (value != 0 && value == 1));
-    //NO_INSTR(printf("TID %d: POP 1: popped: %d, value: %u\n", ThreadIdx(), popped, value));
 
     popped = q.Pop(value);
     ok = ok && (!popped || (value != 0 && value <= 2));
-    //NO_INSTR(printf("TID %d: POP 2: popped: %d, value: %u\n", ThreadIdx(), popped, value));
 
     popped = q.Pop(value);
     ok = ok && (!popped || (value != 0 && value <= 3));
-    //NO_INSTR(printf("TID %d: POP 3: popped: %d, value: %u\n", ThreadIdx(), popped, value));
 
     popped = q.Pop(value);
     ok = ok && (!popped || (value != 0 && value <= 4));
-    //NO_INSTR(printf("TID %d: POP 4: popped: %d, value: %u\n", ThreadIdx(), popped, value));
-
-    //NO_INSTR(printf("TID %d: done: %d, read: %d, value: %d\n", done, read, value));
 
     MustAlways(ok);
-    MustAtleastOnce(popped && value == 4);
+    MustAtleastOnce(2, popped && value == 4);
     RunDone();
   }
 }

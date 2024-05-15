@@ -72,9 +72,13 @@ void test(LockfreeStack& stack) {
     bool ok = true;
     ok = ok && stack.Push(5);
 
+    NO_INSTR(std::cout << ThreadIdx() << "; " << "Push: " << ok << std::endl);
+
     int out;
     ok = ok && stack.Pop(&out);
     ok = ok && (out == 5);
+
+    NO_INSTR(std::cout << ThreadIdx() << "; " << "Pop: " << ok << "; " << out << std::endl);
 
     MustAlways(ok);
     RunDone();

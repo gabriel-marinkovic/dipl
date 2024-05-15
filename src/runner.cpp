@@ -1,6 +1,7 @@
 #include <getopt.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "dr_api.h"
 #include "drmgr.h"
@@ -14,7 +15,13 @@
 
 using namespace app;
 
-void PrintBinary(uint64_t n, uint64_t total_length) {
+static uint64_t GetElapsedMillisCoarse() {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+  return (static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL + static_cast<uint64_t>(ts.tv_nsec)) / 1000000ULL;
+}
+
+static void PrintBinary(uint64_t n, uint64_t total_length) {
   int num_bits = 0;
   uint64_t temp = n;
 
@@ -124,7 +131,8 @@ static int volatile the_done;
 static int volatile the_threads_waiting;
 static int volatile the_threads_running;
 static int volatile the_threads_successful;
-static int volatile the_threads_successful_atleast_once = 1;
+static int volatile the_threads_successful_atleast_once[16];
+static int volatile the_threads_successful_atleast_once_used[16];
 
 static uint64_t the_first_perm;
 static uint64_t the_last_perm;
@@ -141,7 +149,7 @@ static const char* the_exit_path;
 
 static void BestEffortAbort() {
   if (the_exit_path) {
-    file_t df = dr_open_file(the_exit_path, DR_FILE_WRITE_REQUIRE_NEW);
+    file_t df = dr_open_file(the_exit_path, DR_FILE_WRITE_APPEND);
     DR_ASSERT(df != INVALID_FILE);
     dr_close_file(df);
   }
@@ -219,10 +227,15 @@ static bool WrapNextRun() {
         dr_event_signal(other->event);
       }
 
-      if (!dr_atomic_load32(&the_threads_successful_atleast_once)) {
-        dr_printf("`MustAtleastOnce` was never true!\n");
-        BestEffortAbort();
+      bool terminate = false;
+      for (int i = 0; i < ArrayCount(the_threads_successful_atleast_once); ++i) {
+        if (dr_atomic_load32(&the_threads_successful_atleast_once_used[i]) &&
+            !dr_atomic_load32(&the_threads_successful_atleast_once[i])) {
+          dr_printf("`MustAtleastOnce` condition with idx: %d was never true!\n", i);
+          terminate = true;
+        }
       }
+      if (terminate) BestEffortAbort();
     }
   }
 
@@ -284,14 +297,15 @@ static void WrapRunDone() {
       BestEffortAbort();
     }
 
+    uint64_t t = GetElapsedMillisCoarse();
+    atomic_store_u64(&the_last_run_completed_time_ms, t);
+
     if (the_total_run_count % (the_total_perm_count_log / 128) == 0) {
       // TODO: Investigate why using floating point operations (in particular printing, with either `printf` or
       // `dr_printf`) crashes us with the `basic_passing` example.
       // https://dynamorio.org/transparency.html#sec_trans_floating_point
       uint64_t percent = (the_total_run_count * 100) / the_total_perm_count_log;
 
-      uint64_t t = dr_get_milliseconds();
-      atomic_store_u64(&the_last_run_completed_time_ms, t);
       uint64_t elapsed_ms = t - the_start_time_ms;
       uint64_t estimated_total_ms = elapsed_ms * the_total_perm_count_log / the_total_run_count;
 
@@ -326,9 +340,10 @@ static void WrapMustAlways(bool result) {
   drwrap_replace_native_fini(drcontext);
 }
 
-static void WrapMustAtleastOnce(bool result) {
+static void WrapMustAtleastOnce(int condition_idx, bool result) {
   void* drcontext = dr_get_current_drcontext();
-  if (result) dr_atomic_store32(&the_threads_successful_atleast_once, 1);
+  dr_atomic_store32(&the_threads_successful_atleast_once_used[condition_idx], 1);
+  if (result) dr_atomic_store32(&the_threads_successful_atleast_once[condition_idx], 1);
   drwrap_replace_native_fini(drcontext);
 }
 
@@ -735,7 +750,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   dr_log(NULL, DR_LOG_ALL, 1, "Client 'runner' initializing\n");
 
   // Deadlock detecting thread.
-  the_start_time_ms = dr_get_milliseconds();
+  the_start_time_ms = GetElapsedMillisCoarse();
   atomic_store_u64(&the_last_run_completed_time_ms, the_start_time_ms);
 
   bool ok = dr_create_client_thread(

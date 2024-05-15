@@ -48,8 +48,9 @@ void TEST_TOOL_FUNCTION MustAlways(bool ok) {
   prevent_optimization_sink_bool = ok;
 }
 
-void TEST_TOOL_FUNCTION MustAtleastOnce(bool ok) {
+void TEST_TOOL_FUNCTION MustAtleastOnce(int condition_idx, bool ok) {
   FN_PRELUDE;
+  prevent_optimization_sink_int = condition_idx;
   prevent_optimization_sink_bool = ok;
 }
 
@@ -69,11 +70,8 @@ void TEST_TOOL_FUNCTION ContiguousMemoryHint(void* ptr, int size) {
 }
 
 template<typename T>
-thread_local volatile T volatile_t;
-
-template<typename T>
 T TEST_TOOL_FUNCTION PreventOpt(T x) {
   FN_PRELUDE;
-  volatile_t<T> = x;
-  return volatile_t<T>;
+  volatile T volatile_t = x;
+  return volatile_t;
 }
