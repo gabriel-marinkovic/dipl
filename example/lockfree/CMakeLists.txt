@@ -12,3 +12,6 @@ include_directories("${lockfree_SOURCE_DIR}/include")
 
 add_executable(spsc_queue spsc_queue.cpp)
 target_link_libraries(spsc_queue PRIVATE lockfree)
+
+add_executable(spsc_queue_logged spsc_queue_logged.cpp)
+target_link_libraries(spsc_queue_logged PRIVATE lockfree)

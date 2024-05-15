@@ -326,8 +326,9 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
 DYNAMORIO_DIR = "DynamoRIO"
 DYNAMORIO_CLIENTS_DIR = "build/src"
 COLLECT_DIR = "collect"
-APP_UNDER_TEST = "build/example/lockfree/spsc_queue"
-#APP_UNDER_TEST = "build/example/basic_passing"
+#APP_UNDER_TEST = "build/example/lockfree/spsc_queue"
+#APP_UNDER_TEST = "build/example/lockfree/spsc_queue_logged"
+APP_UNDER_TEST = "build/example/basic_passing"
 
 INSTRUCTIONS_PATH = os.path.join(COLLECT_DIR, "instructions.bin")
 EXIT_PATH = os.path.join(COLLECT_DIR, "deadlock")

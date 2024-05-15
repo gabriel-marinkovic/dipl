@@ -147,7 +147,9 @@ static uint64_t volatile the_last_run_completed_time_ms;
 
 static const char* the_exit_path;
 
+static int volatile the_aborting;
 static void BestEffortAbort() {
+  dr_atomic_store32(&the_aborting, 1);
   if (the_exit_path) {
     file_t df = dr_open_file(the_exit_path, DR_FILE_WRITE_APPEND);
     DR_ASSERT(df != INVALID_FILE);
@@ -262,7 +264,8 @@ static void WrapRunDone() {
   DR_ASSERT(remaining >= 0);
 
   if (remaining > 0) {
-    dr_printf("We are done, waiting for others: %d\n", data->thread_idx);
+    // CHANGE
+    // dr_printf("We are done, waiting for others: %d\n", data->thread_idx);
     // There are still other threads running, so wake someone else.
     bool woke_someone = false;
     for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
@@ -318,8 +321,8 @@ static void WrapRunDone() {
       uint64_t m = total_seconds / 60;
       uint64_t s = total_seconds % 60;
 
-      dr_printf("Completed %lu%% of all runs. Estimated time remaining: %lu days and %02lu:%02lu:%02lu\n", percent, d,
-                h, m, s);
+      printf("Completed %lu%% of all runs. Estimated time remaining: %lu days and %02lu:%02lu:%02lu\n", percent, d, h,
+             m, s);
     }
   }
 
@@ -344,7 +347,7 @@ static void WrapMustAlways(bool result) {
 static void WrapMustAtleastOnce(int condition_idx, bool result) {
   void* drcontext = dr_get_current_drcontext();
   dr_atomic_store32(&the_threads_successful_atleast_once_used[condition_idx], 1);
-  //if (result) dr_printf("WrapMustAtleastOnce: %d %d\n", condition_idx, result);
+  // if (result) dr_printf("WrapMustAtleastOnce: %d %d\n", condition_idx, result);
   if (result) dr_atomic_store32(&the_threads_successful_atleast_once[condition_idx], 1);
   drwrap_replace_native_fini(drcontext);
 }
@@ -392,22 +395,24 @@ static void ContextSwitchPoint(uintptr_t instr_addr) {
   bool should_switch = the_switch_mask & 1;
   the_switch_mask >>= 1;
 
-  //dr_printf("%p In context switch point: %d\n", instr_addr, data->thread_idx);
+  // dr_printf("%p In context switch point: %d\n", instr_addr, data->thread_idx);
 
   for (InstrumentedInstruction& instr : the_instrumented_instrs) {
     if (instr.adddr_relative != instr_addr) continue;
     if (!instr.is_syscall) continue;
-    dr_printf("    Context switch point is syscall, and we ate %d\n", should_switch);
+    // dr_printf("    Context switch point is syscall, and we ate %d\n", should_switch);
     break;
   }
 
   if (should_switch) {
-    dr_printf("%d going to sleep before executing 0x%x\n", data->thread_idx, instr_addr);
+    // CHANGE
+    // dr_printf("%d going to sleep before executing 0x%x\n", data->thread_idx, instr_addr);
     bool woke_someone = WakeNextThread(data, true);
     // DR_ASSERT(woke_someone);
   }
 
-  dr_printf("%d will execute 0x%x\n", data->thread_idx, instr_addr);
+  // CHANGE
+  // dr_printf("%d will execute 0x%x\n", data->thread_idx, instr_addr);
 }
 
 static bool event_pre_syscall(void* drcontext, int sysnum) {
@@ -669,6 +674,8 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
     uint64_t total_access_count = 0;
     for (InstrumentedInstruction& instr : the_instrumented_instrs) {
       int factor = (instr.is_syscall ? 2 : 1);
+      // TODO: This is very incorrect if threads don't execute the same code.
+      // CHANGE: try `access_count1` or `access_count2`.
       thread0_access_count += factor * instr.access_count2;
       total_access_count += factor * (instr.access_count1 + instr.access_count2);
     }
@@ -761,6 +768,8 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
         while (true) {
           uint64_t before = atomic_load_u64(&the_last_run_completed_time_ms);
           dr_sleep(60 * 1000);
+          if (dr_atomic_load32(&the_aborting)) return;
+
           uint64_t after = atomic_load_u64(&the_last_run_completed_time_ms);
           if (after <= before) {
             uint64_t perm = atomic_load_u64(&the_current_perm_log);
