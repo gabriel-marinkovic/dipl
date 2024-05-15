@@ -262,6 +262,7 @@ static void WrapRunDone() {
   DR_ASSERT(remaining >= 0);
 
   if (remaining > 0) {
+    dr_printf("We are done, waiting for others: %d\n", data->thread_idx);
     // There are still other threads running, so wake someone else.
     bool woke_someone = false;
     for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
@@ -317,8 +318,8 @@ static void WrapRunDone() {
       uint64_t m = total_seconds / 60;
       uint64_t s = total_seconds % 60;
 
-      printf("Completed %lu%% of all runs. Estimated time remaining: %lu days and %02lu:%02lu:%02lu\n", percent, d, h,
-             m, s);
+      dr_printf("Completed %lu%% of all runs. Estimated time remaining: %lu days and %02lu:%02lu:%02lu\n", percent, d,
+                h, m, s);
     }
   }
 
@@ -343,6 +344,7 @@ static void WrapMustAlways(bool result) {
 static void WrapMustAtleastOnce(int condition_idx, bool result) {
   void* drcontext = dr_get_current_drcontext();
   dr_atomic_store32(&the_threads_successful_atleast_once_used[condition_idx], 1);
+  //if (result) dr_printf("WrapMustAtleastOnce: %d %d\n", condition_idx, result);
   if (result) dr_atomic_store32(&the_threads_successful_atleast_once[condition_idx], 1);
   drwrap_replace_native_fini(drcontext);
 }
@@ -380,7 +382,7 @@ static bool WakeNextThread(ThreadData* thread, bool go_to_sleep) {
   return false;
 }
 
-static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
+static void ContextSwitchPoint(uintptr_t instr_addr) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   if (data->thread_idx < 0) return;
@@ -390,21 +392,22 @@ static void ContextSwitchPoint(uintptr_t instr_addr_relative) {
   bool should_switch = the_switch_mask & 1;
   the_switch_mask >>= 1;
 
-  // dr_printf("%p In context switch point: %d\n", instr_addr_relative, data->thread_idx);
+  //dr_printf("%p In context switch point: %d\n", instr_addr, data->thread_idx);
 
   for (InstrumentedInstruction& instr : the_instrumented_instrs) {
-    if (instr.adddr_relative != instr_addr_relative) continue;
+    if (instr.adddr_relative != instr_addr) continue;
     if (!instr.is_syscall) continue;
-    // dr_printf("    Context switch point is syscall, and we ate %d\n", should_switch);
+    dr_printf("    Context switch point is syscall, and we ate %d\n", should_switch);
     break;
   }
 
   if (should_switch) {
+    dr_printf("%d going to sleep before executing 0x%x\n", data->thread_idx, instr_addr);
     bool woke_someone = WakeNextThread(data, true);
     // DR_ASSERT(woke_someone);
   }
 
-  // dr_printf("LEAVING context switch point: %d\n", data->thread_idx);
+  dr_printf("%d will execute 0x%x\n", data->thread_idx, instr_addr);
 }
 
 static bool event_pre_syscall(void* drcontext, int sysnum) {
@@ -485,7 +488,7 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
     if (instr.addr_absolute != instr_addr) continue;
 
     dr_insert_clean_call(drcontext, bb, where, (void*)ContextSwitchPoint, false, 1,
-                         OPND_CREATE_INTPTR(instr.adddr_relative));
+                         OPND_CREATE_INTPTR(instr.addr_absolute));
     break;
   }
 
@@ -666,7 +669,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
     uint64_t total_access_count = 0;
     for (InstrumentedInstruction& instr : the_instrumented_instrs) {
       int factor = (instr.is_syscall ? 2 : 1);
-      thread0_access_count += factor * instr.access_count1;
+      thread0_access_count += factor * instr.access_count2;
       total_access_count += factor * (instr.access_count1 + instr.access_count2);
     }
 

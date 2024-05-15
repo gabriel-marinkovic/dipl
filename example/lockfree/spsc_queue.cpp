@@ -4,7 +4,7 @@
 #include "test_tools.h"
 #include "lockfree.hpp"
 
-constexpr int QSIZE = 4;
+constexpr int QSIZE = 3;
 using QueueT = lockfree::spsc::Queue<uint32_t, QSIZE>;
 
 void producer(QueueT& q) {
@@ -14,14 +14,18 @@ void producer(QueueT& q) {
     if (ThreadIdx() == 0) {
       q.~QueueT();
       new (&q) QueueT();
+      NO_INSTR(printf("producer cleared\n"));
     }
 
-    q.Push(PreventOpt(1));
-    q.Push(PreventOpt(2));
-    q.Push(PreventOpt(3));
-    q.Push(PreventOpt(4));
-    bool pushed = q.Push(PreventOpt(5));
-    //NO_INSTR(printf("TID %d: pushed: %d\n", ThreadIdx(), pushed));
+    bool pushed;
+    pushed = q.Push(PreventOpt(1));
+    NO_INSTR(printf("pushed 1: %d\n", (int)pushed));
+    pushed = q.Push(PreventOpt(2));
+    NO_INSTR(printf("pushed 2: %d\n", (int)pushed));
+    pushed = q.Push(PreventOpt(3));
+    NO_INSTR(printf("pushed 3: %d\n", (int)pushed));
+    pushed = q.Push(PreventOpt(4));
+    NO_INSTR(printf("pushed 4: %d\n", (int)pushed));
 
     MustAlways(true);
     MustAtleastOnce(0, !pushed);
@@ -37,6 +41,7 @@ void consumer(QueueT& q) {
     if (ThreadIdx() == 0) {
       q.~QueueT();
       new (&q) QueueT();
+      NO_INSTR(printf("consumer cleared\n"));
     }
 
     bool ok = true;
@@ -45,18 +50,18 @@ void consumer(QueueT& q) {
 
     popped = q.Pop(value);
     ok = ok && (!popped || (value != 0 && value == 1));
+    NO_INSTR(printf("consumer pop 1, %d, value %u\n", popped, value));
 
     popped = q.Pop(value);
     ok = ok && (!popped || (value != 0 && value <= 2));
+    NO_INSTR(printf("consumer pop 2, %d, value %u\n", popped, value));
 
     popped = q.Pop(value);
     ok = ok && (!popped || (value != 0 && value <= 3));
-
-    popped = q.Pop(value);
-    ok = ok && (!popped || (value != 0 && value <= 4));
+    NO_INSTR(printf("consumer pop 3, %d, value %u\n", popped, value));
 
     MustAlways(ok);
-    MustAtleastOnce(2, popped && value == 4);
+    MustAtleastOnce(2, popped && value == 3);
     RunDone();
   }
 }

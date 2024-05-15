@@ -125,7 +125,7 @@ static bool WrapNextRun() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  dr_printf("Hello from WrapNextRun!\n");
+  //dr_printf("Hello from WrapNextRun!\n");
 
   bool was_instrumenting = data->entered_instrumentation;
   if (!was_instrumenting) {
@@ -141,7 +141,7 @@ static void WrapRunDone() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  dr_printf("Hello from WrapRunDone!\n");
+  //dr_printf("Hello from WrapRunDone!\n");
 
   DR_ASSERT(IS_INSTRUMENTING(data->seg_base));
   IS_INSTRUMENTING(data->seg_base) = 0;
@@ -159,7 +159,7 @@ static void WrapContiguousMemoryHint(void* ptr, int size) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  dr_printf("Hello from WrapContiguousMemoryHint!\n");
+  //dr_printf("Hello from WrapContiguousMemoryHint!\n");
 
   // TODO: Lame assert.
   DR_ASSERT(size <= 65535);
@@ -492,7 +492,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   DR_ASSERT(main_module);
 
   auto replace_native = [main_module](const char* name, auto* replace_with) {
-    dr_printf("Replacing function %s\n", name);
+    //dr_printf("Replacing function %s\n", name);
 
     size_t offset = 0;
     drsym_error_t status = drsym_lookup_symbol(main_module->full_path, name, &offset, DRSYM_DEFAULT_FLAGS);

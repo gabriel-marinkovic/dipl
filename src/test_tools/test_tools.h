@@ -60,16 +60,15 @@ void TEST_TOOL_FUNCTION ContiguousMemoryHint(void* ptr, int size) {
   prevent_optimization_sink_int = size;
 }
 
-#define NO_INSTR(code)       \
-  do {                       \
-    InstrumentationPause();  \
-    code;                    \
-    InstrumentationResume(); \
+#define NO_INSTR(code)      \
+  do {                      \
+    if (!Instrumenting()) { \
+      code;                 \
+    }                       \
   } while (0)
-
 }
 
-template<typename T>
+template <typename T>
 T TEST_TOOL_FUNCTION PreventOpt(T x) {
   FN_PRELUDE;
   volatile T volatile_t = x;
