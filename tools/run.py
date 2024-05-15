@@ -1,3 +1,4 @@
+import atexit
 import collections
 import dataclasses
 import os
@@ -20,6 +21,19 @@ def run_command(command_name, *args, silent=False, silent_errors=False):
     if not silent_errors and result.stderr:
         print("Error:", result.stderr, end="")
     return result.stdout, result.stderr
+
+
+def kill_process_and_descendants(process):
+    try:
+        parent = psutil.Process(process.pid)
+        for child in parent.children(recursive=True):
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass
+        parent.kill()
+    except psutil.NoSuchProcess:
+        pass
 
 
 def fa(addr):
@@ -313,6 +327,7 @@ DYNAMORIO_DIR = "DynamoRIO"
 DYNAMORIO_CLIENTS_DIR = "build/src"
 COLLECT_DIR = "collect"
 APP_UNDER_TEST = "build/example/lockfree/spsc_queue"
+#APP_UNDER_TEST = "build/example/basic_passing"
 
 INSTRUCTIONS_PATH = os.path.join(COLLECT_DIR, "instructions.bin")
 EXIT_PATH = os.path.join(COLLECT_DIR, "deadlock")
@@ -356,31 +371,16 @@ cmds = [
     "--exit_file", EXIT_PATH,
     "--", APP_UNDER_TEST,
 ]
-
-def check_deadlock(proc):
-    while True:
-        time.sleep(1)
-        if not os.path.exists(EXIT_PATH):
-            continue
-        try:
-            parent = psutil.Process(proc.pid)
-            for child in parent.children(recursive=True):
-                try:
-                    child.kill()
-                except psutil.NoSuchProcess:
-                    pass
-            parent.kill()
-        except psutil.NoSuchProcess:
-            pass
-        return
-
-with subprocess.Popen(cmds, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
-    threading.Thread(target=check_deadlock, args=(proc,), daemon=True).start()
-    for line in proc.stdout:
-        print(line, end="")
-    for line in proc.stderr:
-        print(line, end="")
-    proc.wait()
+with subprocess.Popen(cmds) as process:
+    atexit.register(kill_process_and_descendants, process)
+    def check_deadlock(process):
+        while True:
+            time.sleep(1)
+            if os.path.exists(EXIT_PATH):
+                kill_process_and_descendants(process)
+                return
+    threading.Thread(target=check_deadlock, args=(process,), daemon=True).start()
+    process.wait()
 
 print("All done!")
 print(" ".join(cmds))
