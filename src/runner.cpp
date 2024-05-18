@@ -406,13 +406,6 @@ static void ContextSwitchPoint(uintptr_t instr_addr) {
 
   // dr_printf("%p In context switch point: %d\n", instr_addr, data->thread_idx);
 
-  for (InstrumentedInstruction& instr : the_instrumented_instrs) {
-    if (instr.adddr_relative != instr_addr) continue;
-    if (!instr.is_syscall) continue;
-    // dr_printf("    Context switch point is syscall, and we ate %d\n", should_switch);
-    break;
-  }
-
   if (should_switch) {
     // CHANGE
     //dr_printf("%d going to sleep before executing 0x%x\n", data->thread_idx, instr_addr);
@@ -422,51 +415,6 @@ static void ContextSwitchPoint(uintptr_t instr_addr) {
 
   // CHANGE
   //dr_printf("%d will execute 0x%x\n", data->thread_idx, instr_addr);
-}
-
-static bool event_pre_syscall(void* drcontext, int sysnum) {
-  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
-  if (data->thread_idx < 0) return true;
-  int running = dr_atomic_load32(&the_threads_running);
-  if (running == 0) return true;
-
-  // dr_printf("Hello from pre syscall event: 0x%x, TID: %d\n", sysnum, data->thread_idx);
-
-  if (sysnum == 0xca /* futex */) {
-    uint32_t* address = (uint32_t*)dr_syscall_get_param(drcontext, 0);
-    int futex_op = (int)dr_syscall_get_param(drcontext, 1);
-
-    if (futex_op == 0 /* FUTEX_WAIT */) {
-      uint32_t expected_value = (uint32_t)dr_syscall_get_param(drcontext, 2);
-      dr_printf("(TID: %d) PRE syscall; op: WAIT, address: %p, expected_value: %u\n", data->thread_idx, address,
-                expected_value);
-
-      DR_ASSERT(!data->sleeping_on);
-      data->sleeping_on = address;
-      data->sleeping_until = expected_value;
-
-      bool awoke_someone = WakeNextThread(data, false);
-      DR_ASSERT(awoke_someone);
-    } else if (futex_op == 1 /* FUTEX_WAKE */) {
-      dr_printf("(TID: %d) PRE syscall; op: WAKE, address: %p\n", data->thread_idx, address);
-    }
-  }
-
-  return true;
-}
-
-static void event_post_syscall(void* drcontext, int sysnum) {
-  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
-  int running = dr_atomic_load32(&the_threads_running);
-  if (data->thread_idx < 0) return;
-  if (running == 0) return;
-
-  // dr_printf("Hello from post syscall event: 0x%x, TID: %d, running: %d\n", sysnum, data->thread_idx, running);
-
-  // if (sysnum == 0xca /* futex */) {
-  //   DR_ASSERT(data->sleeping);
-  //   data->sleeping = false;
-  // }
 }
 
 static void instrument_instr(void* drcontext, instrlist_t* ilist, instr_t* where, instr_t* instr) {
@@ -553,8 +501,6 @@ static void event_module_load(void* drcontext, const module_data_t* info, bool l
   }
 }
 
-static bool event_filter_syscall(void* drcontext, int sysnum) { return true; }
-
 static void event_thread_exit(void* drcontext) {
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   dr_thread_free(drcontext, data, sizeof(ThreadData));
@@ -574,11 +520,8 @@ static void event_exit(void) {
   if (!drmgr_unregister_tls_field(the_tls_idx) || !drmgr_unregister_thread_init_event(event_thread_init) ||
       !drmgr_unregister_thread_exit_event(event_thread_exit) || !drmgr_unregister_bb_app2app_event(event_bb_app2app) ||
       !drmgr_unregister_bb_insertion_event(event_app_instruction) ||
-      !drmgr_unregister_module_load_event(event_module_load) ||
-      !drmgr_unregister_pre_syscall_event(event_pre_syscall) ||
-      !drmgr_unregister_post_syscall_event(event_post_syscall) || drreg_exit() != DRREG_SUCCESS)
+      !drmgr_unregister_module_load_event(event_module_load) || drreg_exit() != DRREG_SUCCESS)
     DR_ASSERT(false);
-  dr_unregister_filter_syscall_event(event_filter_syscall);
 
   dr_mutex_destroy(the_mutex);
   drutil_exit();
@@ -721,12 +664,10 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   }
 
   dr_register_exit_event(event_exit);
-  dr_register_filter_syscall_event(event_filter_syscall);
   if (!drmgr_register_thread_init_event(event_thread_init) || !drmgr_register_thread_exit_event(event_thread_exit) ||
       !drmgr_register_bb_app2app_event(event_bb_app2app, NULL) ||
       !drmgr_register_bb_instrumentation_event(NULL /*analysis_func*/, event_app_instruction, NULL) ||
-      !drmgr_register_module_load_event(event_module_load) || !drmgr_register_pre_syscall_event(event_pre_syscall) ||
-      !drmgr_register_post_syscall_event(event_post_syscall))
+      !drmgr_register_module_load_event(event_module_load))
     DR_ASSERT(false);
 
   the_client_id = id;
