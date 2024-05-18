@@ -147,15 +147,24 @@ static uint64_t volatile the_last_run_completed_time_ms;
 
 static const char* the_exit_path;
 
-static int volatile the_aborting;
+// NOTE: `dr_abort` is very flaky on Linux because threads created by `dr_create_client_thread` get their own PID.
+// All threads should call `BestEffortAbort` instead of plain `dr_abort`.
+// All threads created by `dr_create_client_thread` should periodically (as often as possible) check
+// `the_all_threads_should_abort` and call `dr_abort` if set.
+// `BestEffortAbort` also creates an `exit` file which the outer process can use to terminate us in case of a deadlock.
+static int volatile the_all_threads_should_abort;
 static void BestEffortAbort() {
-  dr_atomic_store32(&the_aborting, 1);
+  dr_atomic_store32(&the_all_threads_should_abort, 1);
   if (the_exit_path) {
     file_t df = dr_open_file(the_exit_path, DR_FILE_WRITE_APPEND);
     DR_ASSERT(df != INVALID_FILE);
     dr_close_file(df);
   }
   dr_abort();
+  while (1) {
+    volatile int x = 0;
+    volatile int y = x / x;
+  }
 }
 
 static inline uint64_t atomic_load_u64(uint64_t volatile* x) {
@@ -265,7 +274,7 @@ static void WrapRunDone() {
 
   if (remaining > 0) {
     // CHANGE
-    // dr_printf("We are done, waiting for others: %d\n", data->thread_idx);
+    //dr_printf("We are done, waiting for others: %d\n", data->thread_idx);
     // There are still other threads running, so wake someone else.
     bool woke_someone = false;
     for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
@@ -406,13 +415,13 @@ static void ContextSwitchPoint(uintptr_t instr_addr) {
 
   if (should_switch) {
     // CHANGE
-    // dr_printf("%d going to sleep before executing 0x%x\n", data->thread_idx, instr_addr);
+    //dr_printf("%d going to sleep before executing 0x%x\n", data->thread_idx, instr_addr);
     bool woke_someone = WakeNextThread(data, true);
     // DR_ASSERT(woke_someone);
   }
 
   // CHANGE
-  // dr_printf("%d will execute 0x%x\n", data->thread_idx, instr_addr);
+  //dr_printf("%d will execute 0x%x\n", data->thread_idx, instr_addr);
 }
 
 static bool event_pre_syscall(void* drcontext, int sysnum) {
@@ -577,6 +586,8 @@ static void event_exit(void) {
   drwrap_exit();
   drx_exit();
   drsym_exit();
+
+  dr_atomic_store32(&the_all_threads_should_abort, 1);
 }
 
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
@@ -767,11 +778,11 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
       [](void*) {
         while (true) {
           uint64_t before = atomic_load_u64(&the_last_run_completed_time_ms);
-          dr_sleep(60 * 1000);
-          if (dr_atomic_load32(&the_aborting)) return;
+          dr_sleep(1000);
+          if (dr_atomic_load32(&the_all_threads_should_abort)) dr_abort();
 
-          uint64_t after = atomic_load_u64(&the_last_run_completed_time_ms);
-          if (after <= before) {
+          uint64_t after = GetElapsedMillisCoarse();
+          if (after - before >= 60'000) {
             uint64_t perm = atomic_load_u64(&the_current_perm_log);
             dr_printf("!!! DEADLOCK DETECTED !!! For permutation: 0x%llx\n", perm);
             BestEffortAbort();
@@ -779,4 +790,5 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
         }
       },
       NULL);
+  DR_ASSERT(ok);
 }
