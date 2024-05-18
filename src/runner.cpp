@@ -15,6 +15,18 @@
 
 using namespace app;
 
+// DynamoRIO-like wrappers for unsinged integer atomic operations.
+static inline uint64_t dr_atomic_load_u64(uint64_t volatile* x) {
+  int64_t volatile* ptr = reinterpret_cast<int64_t volatile*>(x);
+  int64_t val = dr_atomic_load64(ptr);
+  return static_cast<uint64_t>(val);
+}
+static inline void dr_atomic_store_u64(uint64_t volatile* x, uint64_t val) {
+  int64_t volatile* ptr = reinterpret_cast<int64_t volatile*>(x);
+  dr_atomic_store64(ptr, static_cast<int64_t>(val));
+}
+
+// General utilities.
 static uint64_t GetElapsedMillisCoarse() {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
@@ -24,19 +36,15 @@ static uint64_t GetElapsedMillisCoarse() {
 static void PrintBinary(uint64_t n, uint64_t total_length) {
   int num_bits = 0;
   uint64_t temp = n;
-
   while (temp > 0) {
     num_bits++;
     temp >>= 1;
   }
-
   int leading_zeros = total_length - num_bits;
   if (leading_zeros < 0) leading_zeros = 0;
-
   for (int i = 0; i < leading_zeros; i++) {
     dr_printf("0");
   }
-
   if (n == 0 && total_length > 0) {
     dr_printf("0");
   } else {
@@ -46,7 +54,8 @@ static void PrintBinary(uint64_t n, uint64_t total_length) {
   }
 }
 
-uint64_t calculate_choose(uint64_t n, uint64_t k) {
+// Permutation utilities.
+static uint64_t CalculateChoose(uint64_t n, uint64_t k) {
   DR_ASSERT(n <= 64);
   uint64_t solutions[64] = {};
   solutions[0] = n - k + 1;
@@ -57,29 +66,16 @@ uint64_t calculate_choose(uint64_t n, uint64_t k) {
 }
 
 // http://graphics.stanford.edu/~seander/bithacks.html
-static inline uint64_t first_perm(uint64_t n, uint64_t c) { return (1 << c) - 1; }
-static inline uint64_t last_perm(uint64_t n, uint64_t c) { return (1 << n) - (1 << (n - c)); }
-static inline uint64_t next_perm(uint64_t v) {
+static inline uint64_t FirstPermutation(uint64_t n, uint64_t c) { return (1 << c) - 1; }
+static inline uint64_t LastPermutation(uint64_t n, uint64_t c) { return (1 << n) - (1 << (n - c)); }
+static inline uint64_t NextPermutation(uint64_t v) {
   uint64_t t = (v | (v - 1)) + 1;
   uint64_t w = t | ((((t & -t) / (v & -v)) >> 1) - 1);
   return w;
 }
-static inline uint64_t perm_as_delta(uint64_t v) { return v ^ (v << 1); }
+static inline uint64_t DeltaFromPermutation(uint64_t v) { return v ^ (v << 1); }
 
-struct ThreadData {
-  bool initialized_instrumentation;
-  int volatile running;
-
-  // Futex state.
-  uint32_t* sleeping_on;
-  uint32_t sleeping_until;
-
-  thread_id_t thread_id;
-  int64_t thread_idx;
-  void* event;
-  uint8_t* seg_base;
-};
-
+// Global state.
 static void* the_mutex;
 static client_id_t the_client_id;
 
@@ -92,38 +88,21 @@ struct InstrumentedInstruction {
   uint64_t access_count1;
   uint64_t access_count2;
 };
-
 static Array<InstrumentedInstruction> the_instrumented_instrs;
 
-/* Allocated TLS slot offsets */
-enum TlsOffset {
-  TLS_OFFSET_BUF_PTR,
-  TLS_OFFSET_IS_INSTRUMENTING,
-  TLS_OFFSET__COUNT,
+struct ThreadData {
+  bool initialized_instrumentation;
+  int volatile running;
+
+  // Futex state.
+  uint32_t* sleeping_on;
+  uint32_t sleeping_until;
+
+  thread_id_t thread_id;
+  int64_t thread_idx;
+  void* event;
 };
-static reg_id_t tls_seg;
-static uint32_t tls_offs;
-static int the_tls_idx;
-#define TLS_SLOT(tls_base, enum_val) (void**)((uint8_t*)(tls_base) + tls_offs + (enum_val) * sizeof(void*))
-#define BUF_PTR(tls_base) *(MemoryReference**)TLS_SLOT(tls_base, TLS_OFFSET_BUF_PTR)
-#define IS_INSTRUMENTING(tls_base) *(uintptr_t*)TLS_SLOT(tls_base, TLS_OFFSET_IS_INSTRUMENTING)
 
-static void insert_load_is_instrumenting(void* drcontext, instrlist_t* ilist, instr_t* where, reg_id_t reg_ptr) {
-  dr_insert_read_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_IS_INSTRUMENTING * sizeof(void*),
-                         reg_ptr);
-}
-
-static void insert_set_is_instrumenting(void* drcontext, instrlist_t* ilist, instr_t* where, uintptr_t value,
-                                        reg_id_t scratch) {
-  instrlist_insert_mov_immed_ptrsz(drcontext, value, opnd_create_reg(scratch), ilist, where, NULL, NULL);
-  dr_insert_write_raw_tls(drcontext, ilist, where, tls_seg, tls_offs + TLS_OFFSET_IS_INSTRUMENTING * sizeof(void*),
-                          scratch);
-}
-
-static uint64_t the_successful_run_count;
-static uint64_t the_total_run_count;
-
-// TODO: This currently assumes that we will have exactly 2 threads (not more OR less).
 static int volatile the_next_thread_idx;
 static ThreadData* the_threads[2];
 
@@ -131,9 +110,11 @@ static int volatile the_done;
 static int volatile the_threads_waiting;
 static int volatile the_threads_running;
 static int volatile the_threads_successful;
-static int volatile the_threads_successful_atleast_once[16];
-static int volatile the_threads_successful_atleast_once_used[16];
+static int volatile the_threads_successful_atleast_once[64];
+static int volatile the_threads_successful_atleast_once_used[64];
 
+static uint64_t the_successful_run_count;
+static uint64_t the_total_run_count;
 static uint64_t the_first_perm;
 static uint64_t the_last_perm;
 static uint64_t the_current_perm;
@@ -145,13 +126,12 @@ static uint64_t the_total_perm_count_log;
 static uint64_t the_start_time_ms;
 static uint64_t volatile the_last_run_completed_time_ms;
 
-static const char* the_exit_path;
-
 // NOTE: `dr_abort` is very flaky on Linux because threads created by `dr_create_client_thread` get their own PID.
 // All threads should call `BestEffortAbort` instead of plain `dr_abort`.
 // All threads created by `dr_create_client_thread` should periodically (as often as possible) check
 // `the_all_threads_should_abort` and call `dr_abort` if set.
 // `BestEffortAbort` also creates an `exit` file which the outer process can use to terminate us in case of a deadlock.
+static const char* the_exit_path;
 static int volatile the_all_threads_should_abort;
 static void BestEffortAbort() {
   dr_atomic_store32(&the_all_threads_should_abort, 1);
@@ -167,16 +147,7 @@ static void BestEffortAbort() {
   }
 }
 
-static inline uint64_t atomic_load_u64(uint64_t volatile* x) {
-  int64_t volatile* ptr = reinterpret_cast<int64_t volatile*>(x);
-  int64_t val = dr_atomic_load64(ptr);
-  return static_cast<uint64_t>(val);
-}
-static inline void atomic_store_u64(uint64_t volatile* x, uint64_t val) {
-  int64_t volatile* ptr = reinterpret_cast<int64_t volatile*>(x);
-  dr_atomic_store64(ptr, static_cast<int64_t>(val));
-}
-
+// `Wrap*` functions.
 static void WrapInstrumentingWaitForAll() {}
 
 static bool WrapNextRun() {
@@ -184,7 +155,7 @@ static bool WrapNextRun() {
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
   // Initialize the event on the first run.
-  // We can't do this in `event_thread_init` because we don't know if a thread is a test thread or for example the main
+  // We can't do this in `EventThreadInit` because we don't know if a thread is a test thread or for example the main
   // application thread.
   if (!data->initialized_instrumentation) {
     data->event = dr_event_create();
@@ -218,10 +189,10 @@ static bool WrapNextRun() {
     dr_atomic_store32(&the_threads_running, ArrayCount(the_threads));
 
     if (the_current_perm <= the_last_perm) {
-      the_switch_mask = perm_as_delta(the_current_perm);
-      atomic_store_u64(&the_current_perm_log, the_current_perm);
-      atomic_store_u64(&the_switch_mask_log, the_switch_mask);
-      the_current_perm = next_perm(the_current_perm);
+      the_switch_mask = DeltaFromPermutation(the_current_perm);
+      dr_atomic_store_u64(&the_current_perm_log, the_current_perm);
+      dr_atomic_store_u64(&the_switch_mask_log, the_switch_mask);
+      the_current_perm = NextPermutation(the_current_perm);
 
       // dr_printf("Using mask 0b");
       // PrintBinary(the_switch_mask_log, the_instrumented_instrs.count * 2);
@@ -311,7 +282,7 @@ static void WrapRunDone() {
     }
 
     uint64_t t = GetElapsedMillisCoarse();
-    atomic_store_u64(&the_last_run_completed_time_ms, t);
+    dr_atomic_store_u64(&the_last_run_completed_time_ms, t);
 
     if (the_total_run_count % (the_total_perm_count_log / 128) == 0) {
       // TODO: Investigate why using floating point operations (in particular printing, with either `printf` or
@@ -417,29 +388,7 @@ static void ContextSwitchPoint(uintptr_t instr_addr) {
   //dr_printf("%d will execute 0x%x\n", data->thread_idx, instr_addr);
 }
 
-static void instrument_instr(void* drcontext, instrlist_t* ilist, instr_t* where, instr_t* instr) {
-  /* We need two scratch registers */
-  reg_id_t reg_ptr, reg_tmp;
-  /* we don't want to predicate this, because an instruction fetch always occurs */
-  instrlist_set_auto_predicate(ilist, DR_PRED_NONE);
-  if (drreg_reserve_register(drcontext, ilist, where, NULL, &reg_ptr) != DRREG_SUCCESS ||
-      drreg_reserve_register(drcontext, ilist, where, NULL, &reg_tmp) != DRREG_SUCCESS ||
-      drreg_reserve_aflags(drcontext, ilist, where) != DRREG_SUCCESS) {
-    DR_ASSERT(false);
-    return;
-  }
-
-  // TODO FILL
-
-  /* Restore scratch registers */
-  if (drreg_unreserve_register(drcontext, ilist, where, reg_ptr) != DRREG_SUCCESS ||
-      drreg_unreserve_register(drcontext, ilist, where, reg_tmp) != DRREG_SUCCESS ||
-      drreg_unreserve_aflags(drcontext, ilist, where) != DRREG_SUCCESS)
-    DR_ASSERT(false);
-  instrlist_set_auto_predicate(ilist, instr_get_predicate(where));
-}
-
-static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrlist_t* bb, instr_t* where,
+static dr_emit_flags_t EventAppInstruction(void* drcontext, void* tag, instrlist_t* bb, instr_t* where,
                                              bool for_trace, bool translating, void* user_data) {
   instr_t* instr_fetch = drmgr_orig_app_instr_for_fetch(drcontext);
   if (!instr_fetch) return DR_EMIT_DEFAULT;
@@ -463,7 +412,7 @@ static dr_emit_flags_t event_app_instruction(void* drcontext, void* tag, instrli
 /* We transform string loops into regular loops so we can more easily
  * monitor every memory reference they make.
  */
-static dr_emit_flags_t event_bb_app2app(void* drcontext, void* tag, instrlist_t* bb, bool for_trace, bool translating) {
+static dr_emit_flags_t EventB2BApp2App(void* drcontext, void* tag, instrlist_t* bb, bool for_trace, bool translating) {
   if (!drutil_expand_rep_string(drcontext, bb)) {
     DR_ASSERT(false);
     /* in release build, carry on: we'll just miss per-iter refs */
@@ -474,7 +423,7 @@ static dr_emit_flags_t event_bb_app2app(void* drcontext, void* tag, instrlist_t*
   return DR_EMIT_DEFAULT;
 }
 
-static void event_thread_init(void* drcontext) {
+static void EventThreadInit(void* drcontext) {
   ThreadData* data = (ThreadData*)dr_thread_alloc(drcontext, sizeof(ThreadData));
   DR_ASSERT(data != NULL);
   memset(data, 0, sizeof(*data));
@@ -487,7 +436,7 @@ static void event_thread_init(void* drcontext) {
   IS_INSTRUMENTING(data->seg_base) = 0;
 }
 
-static void event_module_load(void* drcontext, const module_data_t* info, bool loaded) {
+static void EventModuleLoad(void* drcontext, const module_data_t* info, bool loaded) {
   dr_mutex_lock(the_mutex);
   Defer(dr_mutex_unlock(the_mutex));
 
@@ -501,12 +450,12 @@ static void event_module_load(void* drcontext, const module_data_t* info, bool l
   }
 }
 
-static void event_thread_exit(void* drcontext) {
+static void EventThreadExit(void* drcontext) {
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   dr_thread_free(drcontext, data, sizeof(ThreadData));
 }
 
-static void event_exit(void) {
+static void EventExit(void) {
   dr_printf("\n\nTOTAL SUCCESSES: %llu / %llu\n", the_successful_run_count, the_total_run_count);
 
   for (auto& instr : the_instrumented_instrs) {
@@ -517,10 +466,10 @@ static void event_exit(void) {
   dr_log(NULL, DR_LOG_ALL, 1, "Client 'runner' exit\n");
   if (!dr_raw_tls_cfree(tls_offs, TLS_OFFSET__COUNT)) DR_ASSERT(false);
 
-  if (!drmgr_unregister_tls_field(the_tls_idx) || !drmgr_unregister_thread_init_event(event_thread_init) ||
-      !drmgr_unregister_thread_exit_event(event_thread_exit) || !drmgr_unregister_bb_app2app_event(event_bb_app2app) ||
-      !drmgr_unregister_bb_insertion_event(event_app_instruction) ||
-      !drmgr_unregister_module_load_event(event_module_load) || drreg_exit() != DRREG_SUCCESS)
+  if (!drmgr_unregister_tls_field(the_tls_idx) || !drmgr_unregister_thread_init_event(EventThreadInit) ||
+      !drmgr_unregister_thread_exit_event(EventThreadExit) || !drmgr_unregister_bb_app2app_event(EventB2BApp2App) ||
+      !drmgr_unregister_bb_insertion_event(EventAppInstruction) ||
+      !drmgr_unregister_module_load_event(EventModuleLoad) || drreg_exit() != DRREG_SUCCESS)
     DR_ASSERT(false);
 
   dr_mutex_destroy(the_mutex);
@@ -646,7 +595,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
 
     if (got_permutation) {
       dr_printf("\nUsing explicit permutation: 0b", permutation);
-      PrintBinary(perm_as_delta(permutation), the_instrumented_instrs.count * 2);
+      PrintBinary(DeltaFromPermutation(permutation), the_instrumented_instrs.count * 2);
       dr_printf(" (0b");
       PrintBinary(permutation, the_instrumented_instrs.count * 2);
       dr_printf(") (hex permutation: 0x%x)\n", permutation);
@@ -655,19 +604,19 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
       the_first_perm = permutation;
       the_last_perm = permutation;
     } else {
-      the_first_perm = first_perm(total_access_count, thread0_access_count);
-      the_last_perm = last_perm(total_access_count, thread0_access_count);
-      the_total_perm_count_log = calculate_choose(total_access_count, thread0_access_count);
+      the_first_perm = FirstPermutation(total_access_count, thread0_access_count);
+      the_last_perm = LastPermutation(total_access_count, thread0_access_count);
+      the_total_perm_count_log = CalculateChoose(total_access_count, thread0_access_count);
     }
     the_current_perm = the_first_perm;
     the_current_perm_log = the_first_perm;
   }
 
-  dr_register_exit_event(event_exit);
-  if (!drmgr_register_thread_init_event(event_thread_init) || !drmgr_register_thread_exit_event(event_thread_exit) ||
-      !drmgr_register_bb_app2app_event(event_bb_app2app, NULL) ||
-      !drmgr_register_bb_instrumentation_event(NULL /*analysis_func*/, event_app_instruction, NULL) ||
-      !drmgr_register_module_load_event(event_module_load))
+  dr_register_exit_event(EventExit);
+  if (!drmgr_register_thread_init_event(EventThreadInit) || !drmgr_register_thread_exit_event(EventThreadExit) ||
+      !drmgr_register_bb_app2app_event(EventB2BApp2App, NULL) ||
+      !drmgr_register_bb_instrumentation_event(NULL /*analysis_func*/, EventAppInstruction, NULL) ||
+      !drmgr_register_module_load_event(EventModuleLoad))
     DR_ASSERT(false);
 
   the_client_id = id;
@@ -703,28 +652,22 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
 
   the_tls_idx = drmgr_register_tls_field();
   DR_ASSERT(the_tls_idx != -1);
-  /* The TLS field provided by DR cannot be directly accessed from the code cache.
-   * For better performance, we allocate raw TLS so that we can directly
-   * access and update it with a single instruction.
-   */
-  if (!dr_raw_tls_calloc(&tls_seg, &tls_offs, TLS_OFFSET__COUNT, alignof(void*))) DR_ASSERT(false);
-
   dr_log(NULL, DR_LOG_ALL, 1, "Client 'runner' initializing\n");
 
   // Deadlock detecting thread.
   the_start_time_ms = GetElapsedMillisCoarse();
-  atomic_store_u64(&the_last_run_completed_time_ms, the_start_time_ms);
+  dr_atomic_store_u64(&the_last_run_completed_time_ms, the_start_time_ms);
 
   bool ok = dr_create_client_thread(
       [](void*) {
         while (true) {
-          uint64_t before = atomic_load_u64(&the_last_run_completed_time_ms);
+          uint64_t before = dr_atomic_load_u64(&the_last_run_completed_time_ms);
           dr_sleep(1000);
           if (dr_atomic_load32(&the_all_threads_should_abort)) dr_abort();
 
           uint64_t after = GetElapsedMillisCoarse();
           if (after - before >= 60'000) {
-            uint64_t perm = atomic_load_u64(&the_current_perm_log);
+            uint64_t perm = dr_atomic_load_u64(&the_current_perm_log);
             dr_printf("!!! DEADLOCK DETECTED !!! For permutation: 0x%llx\n", perm);
             BestEffortAbort();
           }
