@@ -340,7 +340,7 @@ os.makedirs(COLLECT_DIR)
 print("Collecting...")
 run_command(
     os.path.join(DYNAMORIO_DIR, "bin64/drrun"),
-    "-c", os.path.join(DYNAMORIO_CLIENTS_DIR, "libclient.so"),
+    "-c", os.path.join(DYNAMORIO_CLIENTS_DIR, "libcollector.so"),
     "--", APP_UNDER_TEST,
     silent_errors=True,
 )

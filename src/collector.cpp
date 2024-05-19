@@ -1,3 +1,7 @@
+// Code in this source file is a heavily modified version of
+// https://github.com/DynamoRIO/dynamorio/blob/7db4ca97d8bea55345aaa6ee3d66bbbd13ee6496/api/samples/memtrace_simple.c
+// The original copyright notice follows:
+
 /* ******************************************************************************
  * Copyright (c) 2013-2018 Google, Inc.  All rights reserved.
  * Copyright (c) 2011 Massachusetts Institute of Technology  All rights reserved.
@@ -32,7 +36,7 @@
  * DAMAGE.
  */
 
-#include <stddef.h> /* for offsetof */
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -453,8 +457,6 @@ static void EventExit() {
   drwrap_exit();
   drx_exit();
   drsym_exit();
-
-  // printf("we done\n");
 }
 
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
