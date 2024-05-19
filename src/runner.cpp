@@ -78,6 +78,7 @@ static inline uint64_t DeltaFromPermutation(uint64_t v) { return v ^ (v << 1); }
 // Global state.
 static void* the_mutex;
 static client_id_t the_client_id;
+static int the_tls_idx;
 
 struct InstrumentedInstruction {
   String path;
@@ -93,11 +94,6 @@ static Array<InstrumentedInstruction> the_instrumented_instrs;
 struct ThreadData {
   bool initialized_instrumentation;
   int volatile running;
-
-  // Futex state.
-  uint32_t* sleeping_on;
-  uint32_t sleeping_until;
-
   thread_id_t thread_id;
   int64_t thread_idx;
   void* event;
@@ -245,7 +241,7 @@ static void WrapRunDone() {
 
   if (remaining > 0) {
     // CHANGE
-    //dr_printf("We are done, waiting for others: %d\n", data->thread_idx);
+    // dr_printf("We are done, waiting for others: %d\n", data->thread_idx);
     // There are still other threads running, so wake someone else.
     bool woke_someone = false;
     for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
@@ -332,8 +328,7 @@ static void WrapMustAtleastOnce(int condition_idx, bool result) {
   drwrap_replace_native_fini(drcontext);
 }
 
-static bool WakeNextThread(ThreadData* thread, bool go_to_sleep) {
-  ThreadData* first_running_and_sleeping_idx = NULL;
+static bool WakeNextThread(ThreadData* thread) {
   for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
     int64_t next_thread_idx = (thread->thread_idx + i) % ArrayCount(the_threads);
     ThreadData* other = the_threads[next_thread_idx];
@@ -341,27 +336,15 @@ static bool WakeNextThread(ThreadData* thread, bool go_to_sleep) {
     DR_ASSERT(other != thread);
     if (!dr_atomic_load32(&other->running)) continue;
 
-    if (!first_running_and_sleeping_idx && !other->sleeping_on) {
-      first_running_and_sleeping_idx = other;
-    }
-
-    if (go_to_sleep) {
-      // dr_printf("sleeping in context switch point: %d (%d)\n", thread->thread_idx, thread->thread_id);
-    }
+    // dr_printf("sleeping in context switch point: %d (%d)\n", thread->thread_idx, thread->thread_id);
     DR_ASSERT(thread->event);
     dr_event_signal(other->event);
-    if (go_to_sleep) {
-      dr_event_wait(thread->event);
-      dr_event_reset(thread->event);
-      // dr_printf("WAKING in context switch point: %d\n", thread->thread_idx);
-    }
+    dr_event_wait(thread->event);
+    dr_event_reset(thread->event);
+    // dr_printf("WAKING in context switch point: %d\n", thread->thread_idx);
     return true;
   }
 
-  if (first_running_and_sleeping_idx) {
-    // dr_printf("FAILED TO WAKE, but there was a running thread which was sleeping: %d. Deadlock?\n",
-    //           first_running_and_sleeping_idx->thread_idx);
-  }
   return false;
 }
 
@@ -379,17 +362,17 @@ static void ContextSwitchPoint(uintptr_t instr_addr) {
 
   if (should_switch) {
     // CHANGE
-    //dr_printf("%d going to sleep before executing 0x%x\n", data->thread_idx, instr_addr);
-    bool woke_someone = WakeNextThread(data, true);
+    // dr_printf("%d going to sleep before executing 0x%x\n", data->thread_idx, instr_addr);
+    bool woke_someone = WakeNextThread(data);
     // DR_ASSERT(woke_someone);
   }
 
   // CHANGE
-  //dr_printf("%d will execute 0x%x\n", data->thread_idx, instr_addr);
+  // dr_printf("%d will execute 0x%x\n", data->thread_idx, instr_addr);
 }
 
-static dr_emit_flags_t EventAppInstruction(void* drcontext, void* tag, instrlist_t* bb, instr_t* where,
-                                             bool for_trace, bool translating, void* user_data) {
+static dr_emit_flags_t EventAppInstruction(void* drcontext, void* tag, instrlist_t* bb, instr_t* where, bool for_trace,
+                                           bool translating, void* user_data) {
   instr_t* instr_fetch = drmgr_orig_app_instr_for_fetch(drcontext);
   if (!instr_fetch) return DR_EMIT_DEFAULT;
 
@@ -431,9 +414,6 @@ static void EventThreadInit(void* drcontext) {
 
   data->thread_idx = -1;
   data->thread_id = dr_get_thread_id(drcontext);
-  data->seg_base = (uint8_t*)dr_get_dr_segment_base(tls_seg);
-  DR_ASSERT(data->seg_base);
-  IS_INSTRUMENTING(data->seg_base) = 0;
 }
 
 static void EventModuleLoad(void* drcontext, const module_data_t* info, bool loaded) {
@@ -464,7 +444,6 @@ static void EventExit(void) {
   DrThreadFreeArray(NULL, &the_instrumented_instrs);
 
   dr_log(NULL, DR_LOG_ALL, 1, "Client 'runner' exit\n");
-  if (!dr_raw_tls_cfree(tls_offs, TLS_OFFSET__COUNT)) DR_ASSERT(false);
 
   if (!drmgr_unregister_tls_field(the_tls_idx) || !drmgr_unregister_thread_init_event(EventThreadInit) ||
       !drmgr_unregister_thread_exit_event(EventThreadExit) || !drmgr_unregister_bb_app2app_event(EventB2BApp2App) ||
