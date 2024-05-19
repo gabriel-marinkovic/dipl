@@ -470,7 +470,7 @@ static void EventExit(void) {
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   /* We need 2 reg slots beyond drreg's eflags slots => 3 slots */
   drreg_options_t ops = {sizeof(ops), 3, false};
-  dr_set_client_name("Runner", "");
+  dr_set_client_name("runner", "");
 
   if (!drmgr_init() || drreg_init(&ops) != DRREG_SUCCESS || !drutil_init() || !drwrap_init() || !drx_init() ||
       drsym_init(0) != DRSYM_SUCCESS)
