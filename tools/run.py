@@ -1,3 +1,4 @@
+import argparse
 import atexit
 import collections
 import dataclasses
@@ -358,32 +359,67 @@ def get_instructions_to_instrument(
     return instrumented
 
 
-DYNAMORIO_DIR = "DynamoRIO"
-DYNAMORIO_CLIENTS_DIR = "build/src"
-COLLECT_DIR = "collect"
-# APP_UNDER_TEST = "build/example/lockfree/spsc_queue"
-# APP_UNDER_TEST = "build/example/lockfree/spsc_queue_logged"
-APP_UNDER_TEST = "build/example/basic_passing"
+parser = argparse.ArgumentParser(
+    prog="lockfree_tester", description="lockfree_tester runner"
+)
+parser.add_argument("test_executable", help="Path to the test executable")
+parser.add_argument(
+    "-c",
+    "--collect_dir",
+    default="./collect",
+    help="Directory which will contain collected instrumentation data",
+)
+parser.add_argument(
+    "--dynamorio_dir", default="./DynamoRIO", help="`DynamoRIO` installation directory"
+)
+parser.add_argument(
+    "--dynamorio_clients_dir",
+    default="./build/src",
+    help="Directory which contains `libcollector.so` and `librunner.so`",
+)
+parser.add_argument(
+    "-t",
+    "--trace",
+    action="store_true",
+    default=False,
+    help="Enable tracing output. Same as setting both `--trace_test and `--trace_runner`",
+)
+parser.add_argument(
+    "--trace_test",
+    action="store_true",
+    default=False,
+    help="Enable tracing output for the test program",
+)
+parser.add_argument(
+    "--trace_runner",
+    action="store_true",
+    default=False,
+    help="Enable tracing output the test runner",
+)
+args = parser.parse_args()
+if args.trace:
+    args.trace_test = True
+    args.trace_runner = True
 
-INSTRUCTIONS_PATH = os.path.join(COLLECT_DIR, "instructions.bin")
-EXIT_PATH = os.path.join(COLLECT_DIR, "deadlock")
+INSTRUCTIONS_PATH = os.path.join(args.collect_dir, "instructions.bin")
+EXIT_PATH = os.path.join(args.collect_dir, "exit")
 
-print("Deleting", COLLECT_DIR, "...")
-shutil.rmtree(COLLECT_DIR, ignore_errors=True)
-os.makedirs(COLLECT_DIR)
+print("Deleting", args.collect_dir, "...")
+shutil.rmtree(args.collect_dir, ignore_errors=True)
+os.makedirs(args.collect_dir)
 
 print("Collecting...")
 run_command(
-    os.path.join(DYNAMORIO_DIR, "bin64/drrun"),
+    os.path.join(args.dynamorio_dir, "bin64/drrun"),
     "-c",
-    os.path.join(DYNAMORIO_CLIENTS_DIR, "libcollector.so"),
+    os.path.join(args.dynamorio_clients_dir, "libcollector.so"),
     "--",
-    APP_UNDER_TEST,
+    args.test_executable,
     silent_errors=True,
 )
 
 print("Determining instructions...")
-instrumented = get_instructions_to_instrument(COLLECT_DIR)
+instrumented = get_instructions_to_instrument(args.collect_dir)
 
 print("Creating", INSTRUCTIONS_PATH, "...")
 with open(INSTRUCTIONS_PATH, "wb") as f:
@@ -401,18 +437,19 @@ print("Instrumented instruction count:", len(instrumented))
 # Run the tests and periodically check if `EXIT_PATH` exists, in which case terminate the process.
 print("Running tests...")
 cmds = [
-    os.path.join(DYNAMORIO_DIR, "bin64/drrun"),
+    os.path.join(args.dynamorio_dir, "bin64/drrun"),
     "-opt_cleancall",
     "2",
     "-opt_speed",
     "-c",
-    os.path.join(DYNAMORIO_CLIENTS_DIR, "librunner.so"),
+    os.path.join(args.dynamorio_clients_dir, "librunner.so"),
     "--instructions_file",
     INSTRUCTIONS_PATH,
     "--exit_file",
     EXIT_PATH,
+    "--trace" if args.trace_runner else "",
     "--",
-    APP_UNDER_TEST,
+    args.test_executable,
 ]
 print(" ".join(cmds))
 
