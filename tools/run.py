@@ -8,14 +8,16 @@ import struct
 import subprocess
 import threading
 import time
-from typing import DefaultDict, Dict, FrozenSet, List, Set, Tuple
+from typing import DefaultDict, FrozenSet, List, Set, Tuple
 
 
 def run_command(command_name, *args, silent=False, silent_errors=False):
     command = [command_name] + list(args)
     if not silent:
         print("CMD:", " ".join(command))
-    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    result = subprocess.run(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
     if not silent and result.stdout:
         print(result.stdout, end="")
     if not silent_errors and result.stderr:
@@ -43,14 +45,17 @@ def fa(addr):
 def read_packed_string(file):
     size_format = "<Q"
     size_bytes = file.read(struct.calcsize(size_format))
-    size, = struct.unpack(size_format, size_bytes)
+    (size,) = struct.unpack(size_format, size_bytes)
     return file.read(size).decode("utf-8")
+
 
 def write_packed_bool8(file, x):
     file.write(struct.pack("<B", x))
 
+
 def write_packed_int64(file, x):
     file.write(struct.pack("<Q", x))
+
 
 def write_packed_string(file, s):
     write_packed_int64(file, len(s))
@@ -63,6 +68,7 @@ class Operand:
     address: int
     size: int
 
+
 @dataclasses.dataclass(frozen=True)
 class Instruction:
     name: str
@@ -73,6 +79,7 @@ class Instruction:
     addresses_read: FrozenSet[int]
     addresses_written: FrozenSet[int]
     addresses_touched: FrozenSet[int]
+
 
 @dataclasses.dataclass
 class InstructionWIP:
@@ -102,6 +109,7 @@ class InstructionWIP:
             addresses_touched=frozenset(addr_r | addr_w),
         )
 
+
 @dataclasses.dataclass(frozen=True)
 class ThreadAccess:
     thread_idx: int
@@ -109,6 +117,7 @@ class ThreadAccess:
     instr_name: str
     read_addrs: FrozenSet[int]
     write_addrs: FrozenSet[int]
+
 
 @dataclasses.dataclass(frozen=True)
 class Module:
@@ -131,6 +140,7 @@ class InstructionToInstrument:
 
     def runtime_address(self) -> int:
         return self.module.base + self.offset
+
     def preferred_address(self) -> int:
         return self.module.preferred_base + self.offset
 
@@ -150,7 +160,9 @@ def parse_modules(directory) -> Tuple[Module]:
                 if not record_bytes:
                     break
 
-                loaded, entry_point, preferred_base, start, end = struct.unpack(record_format, record_bytes)
+                loaded, entry_point, preferred_base, start, end = struct.unpack(
+                    record_format, record_bytes
+                )
                 module = Module(
                     entry_point=entry_point,
                     preferred_base=preferred_base,
@@ -185,13 +197,15 @@ def process_file(
             thread_idxs_from_instr[frozen].append(thread_idx)
         if frozen.name == "syscall":
             thread_idxs_from_instr[frozen].append(thread_idx)
-        thread_accesses.add(ThreadAccess(
-            thread_idx=thread_idx,
-            instr_addr=frozen.address,
-            instr_name=frozen.name,
-            read_addrs=frozen.addresses_read,
-            write_addrs=frozen.addresses_written,
-        ))
+        thread_accesses.add(
+            ThreadAccess(
+                thread_idx=thread_idx,
+                instr_addr=frozen.address,
+                instr_name=frozen.name,
+                read_addrs=frozen.addresses_read,
+                write_addrs=frozen.addresses_written,
+            )
+        )
 
     with open(file_path, "rb") as file:
         instr = None
@@ -213,6 +227,7 @@ def process_file(
                                 block.update(addrs)
                                 return
                     memory_hints.append(set(addrs))
+
                 f(memory_hints, addr, size)
                 continue
 
@@ -237,10 +252,15 @@ def process_file(
                     instr.dst_ops.append(op)
         push_instr(instr)
 
-def get_instructions_to_instrument(collect_directory: str) -> List[InstructionToInstrument]:
+
+def get_instructions_to_instrument(
+    collect_directory: str,
+) -> List[InstructionToInstrument]:
     modules = parse_modules(collect_directory)
 
-    thread_idxs_from_instr: DefaultDict[Instruction, List[int]] = collections.defaultdict(list)
+    thread_idxs_from_instr: DefaultDict[Instruction, List[int]] = (
+        collections.defaultdict(list)
+    )
     thread_accesses: Set[ThreadAccess] = set()
     memory_hints: List[Set[int]] = []
     thread_idx = 0
@@ -254,7 +274,9 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
         if file_size > 1024**2:
             print("skipping", filename, "cause too large:", file_size / 1024**2, "MB")
             continue
-        process_file(thread_idxs_from_instr, thread_accesses, memory_hints, thread_idx, file_path)
+        process_file(
+            thread_idxs_from_instr, thread_accesses, memory_hints, thread_idx, file_path
+        )
         thread_idx += 1
 
     def with_hints(hints, addrs):
@@ -270,8 +292,11 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
             if a1.thread_idx == a2.thread_idx:
                 continue
             mem_intersection = (
-                (with_hints(memory_hints, a1.write_addrs) & with_hints(memory_hints, a2.read_addrs)) |
-                (with_hints(memory_hints, a2.write_addrs) & with_hints(memory_hints, a1.read_addrs))
+                with_hints(memory_hints, a1.write_addrs)
+                & with_hints(memory_hints, a2.read_addrs)
+            ) | (
+                with_hints(memory_hints, a2.write_addrs)
+                & with_hints(memory_hints, a1.read_addrs)
             )
             shared_memory.update(mem_intersection)
     print(f"{len(shared_memory)=}")
@@ -305,20 +330,30 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
         preferred_address = module.preferred_base + offset
 
         out, err = run_command(
-            "addr2line", "-Cafipe", module.path, f"0x{preferred_address:x}",
-            silent=True, silent_errors=True,
+            "addr2line",
+            "-Cafipe",
+            module.path,
+            f"0x{preferred_address:x}",
+            silent=True,
+            silent_errors=True,
         )
         addr2line = (out + err).strip()
-        instrumented.append(InstructionToInstrument(
-            module=module,
-            name=name,
-            offset=offset,
-            access_count1=access_count_per_instruction_address[addr][0],
-            access_count2=access_count_per_instruction_address[addr][1],
-            addr2line_output=addr2line
-        ))
+        instrumented.append(
+            InstructionToInstrument(
+                module=module,
+                name=name,
+                offset=offset,
+                access_count1=access_count_per_instruction_address[addr][0],
+                access_count2=access_count_per_instruction_address[addr][1],
+                addr2line_output=addr2line,
+            )
+        )
 
-        print("{: <64}{: <12}0x{:x} ({} times)".format(module.path, name, offset, access_count_per_instruction_address[addr]))
+        print(
+            "{: <64}{: <12}0x{:x} ({} times)".format(
+                module.path, name, offset, access_count_per_instruction_address[addr]
+            )
+        )
 
     return instrumented
 
@@ -326,8 +361,8 @@ def get_instructions_to_instrument(collect_directory: str) -> List[InstructionTo
 DYNAMORIO_DIR = "DynamoRIO"
 DYNAMORIO_CLIENTS_DIR = "build/src"
 COLLECT_DIR = "collect"
-#APP_UNDER_TEST = "build/example/lockfree/spsc_queue"
-#APP_UNDER_TEST = "build/example/lockfree/spsc_queue_logged"
+# APP_UNDER_TEST = "build/example/lockfree/spsc_queue"
+# APP_UNDER_TEST = "build/example/lockfree/spsc_queue_logged"
 APP_UNDER_TEST = "build/example/basic_passing"
 
 INSTRUCTIONS_PATH = os.path.join(COLLECT_DIR, "instructions.bin")
@@ -340,8 +375,10 @@ os.makedirs(COLLECT_DIR)
 print("Collecting...")
 run_command(
     os.path.join(DYNAMORIO_DIR, "bin64/drrun"),
-    "-c", os.path.join(DYNAMORIO_CLIENTS_DIR, "libcollector.so"),
-    "--", APP_UNDER_TEST,
+    "-c",
+    os.path.join(DYNAMORIO_CLIENTS_DIR, "libcollector.so"),
+    "--",
+    APP_UNDER_TEST,
     silent_errors=True,
 )
 
@@ -359,29 +396,36 @@ with open(INSTRUCTIONS_PATH, "wb") as f:
         write_packed_int64(f, instr.access_count2)
 
 print("Instrumented instruction count:", len(instrumented))
-#exit(0)
+# exit(0)
 
 # Run the tests and periodically check if `EXIT_PATH` exists, in which case terminate the process.
 print("Running tests...")
 cmds = [
     os.path.join(DYNAMORIO_DIR, "bin64/drrun"),
-    "-opt_cleancall", "2",
+    "-opt_cleancall",
+    "2",
     "-opt_speed",
-    "-c", os.path.join(DYNAMORIO_CLIENTS_DIR, "librunner.so"),
-    "--instructions_file", INSTRUCTIONS_PATH,
-    "--exit_file", EXIT_PATH,
-    "--", APP_UNDER_TEST,
+    "-c",
+    os.path.join(DYNAMORIO_CLIENTS_DIR, "librunner.so"),
+    "--instructions_file",
+    INSTRUCTIONS_PATH,
+    "--exit_file",
+    EXIT_PATH,
+    "--",
+    APP_UNDER_TEST,
 ]
 print(" ".join(cmds))
 
 with subprocess.Popen(cmds) as process:
     atexit.register(kill_process_and_descendants, process)
+
     def check_deadlock(process):
         while True:
             time.sleep(1)
             if os.path.exists(EXIT_PATH):
                 kill_process_and_descendants(process)
                 return
+
     threading.Thread(target=check_deadlock, args=(process,), daemon=True).start()
     process.wait()
 
