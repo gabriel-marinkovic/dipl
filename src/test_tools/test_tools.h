@@ -31,17 +31,18 @@ void TEST_TOOL_FUNCTION InstrumentingWaitForAll() {
   InstrumentationResume();
 }
 
+int TEST_TOOL_FUNCTION RegisterThread(int preferred_thread_id = -1) {
+  FN_PRELUDE;
+  volatile int prevent_optimization_thread_id = preferred_thread_id;
+  return prevent_optimization_thread_id;
+}
+
 bool TEST_TOOL_FUNCTION NextRun() {
   FN_PRELUDE;
   return prevent_optimization_literal_bool_false;
 }
 
 void TEST_TOOL_FUNCTION RunDone() { FN_PRELUDE; }
-
-int TEST_TOOL_FUNCTION ThreadIdx() {
-  FN_PRELUDE;
-  return prevent_optimization_literal_int_minus_one;
-}
 
 void TEST_TOOL_FUNCTION MustAlways(bool ok) {
   FN_PRELUDE;

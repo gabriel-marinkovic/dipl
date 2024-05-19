@@ -7,8 +7,9 @@
 std::atomic<int> x{0};
 
 void test() {
+  int thread_id = RegisterThread();
   while (NextRun()) {
-    if (ThreadIdx() == 0) {
+    if (thread_id == 0) {
       x = 0;
     }
 

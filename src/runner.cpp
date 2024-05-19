@@ -108,7 +108,6 @@ struct ThreadData {
   void* event;
 };
 
-static int volatile the_next_thread_idx;
 static ThreadData* the_threads[2];
 
 static int volatile the_done;
@@ -155,21 +154,40 @@ static void BestEffortAbort() {
 // `Wrap*` functions.
 static void WrapInstrumentingWaitForAll() {}
 
-static bool WrapNextRun() {
+static int WrapRegisterThread(int preferred_thread_idx = -1) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  // Initialize the event on the first run.
-  // We can't do this in `EventThreadInit` because we don't know if a thread is a test thread or for example the main
-  // application thread.
-  if (!data->initialized_instrumentation) {
-    data->event = dr_event_create();
-    DR_ASSERT(data->event);
-    data->thread_idx = dr_atomic_add32_return_sum(&the_next_thread_idx, 1) - 1;
-    DR_ASSERT(data->thread_idx < ArrayCount(the_threads));
-    the_threads[data->thread_idx] = data;
-    data->initialized_instrumentation = true;
+  DR_ASSERT(preferred_thread_idx <= 1);
+  DR_ASSERT(!data->initialized_instrumentation);
+
+  dr_mutex_lock(the_mutex);
+  if (preferred_thread_idx < 0) {
+    for (int i = 0; i < ArrayCount(the_threads); ++i) {
+      if (!the_threads[i]) {
+        preferred_thread_idx = i;
+        break;
+      }
+    }
+    DR_ASSERT(preferred_thread_idx >= 0 && preferred_thread_idx < ArrayCount(the_threads));
   }
+  DR_ASSERT(!the_threads[preferred_thread_idx]);
+  data->thread_idx = preferred_thread_idx;
+  the_threads[data->thread_idx] = data;
+  dr_mutex_unlock(the_mutex);
+
+  data->event = dr_event_create();
+  DR_ASSERT(data->event);
+  data->initialized_instrumentation = true;
+
+  drwrap_replace_native_fini(drcontext);
+  return data->thread_idx;
+}
+
+static bool WrapNextRun() {
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+  DR_ASSERT(data->initialized_instrumentation);
 
   // dr_printf("Hello from WrapNextRun! TID: %d\n", data->thread_idx);
 
@@ -311,13 +329,6 @@ static void WrapRunDone() {
   }
 
   drwrap_replace_native_fini(drcontext);
-}
-
-static int WrapThreadIdx() {
-  void* drcontext = dr_get_current_drcontext();
-  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
-  drwrap_replace_native_fini(drcontext);
-  return data->thread_idx;
 }
 
 static void WrapMustAlways(bool result) {
@@ -631,9 +642,9 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   // `InstrumentationPause` is already noop.
   // `InstrumentationResume` is already noop.
   replace_native("InstrumentingWaitForAll", WrapInstrumentingWaitForAll);
+  replace_native("RegisterThread", WrapRegisterThread);
   replace_native("NextRun", WrapNextRun);
   replace_native("RunDone", WrapRunDone);
-  replace_native("ThreadIdx", WrapThreadIdx);
   replace_native("MustAlways", WrapMustAlways);
   replace_native("MustAtleastOnce", WrapMustAtleastOnce);
 

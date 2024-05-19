@@ -62,8 +62,10 @@ class LockfreeStack {
 };
 
 void test(LockfreeStack& stack) {
+  int thread_id = RegisterThread();
+
   while (NextRun()) {
-    if (ThreadIdx() == 0) {
+    if (thread_id == 0) {
       stack.~LockfreeStack();
       new (&stack) LockfreeStack();
       the_hacky_bump_allocator_next.store(0, std::memory_order_seq_cst);
@@ -72,13 +74,13 @@ void test(LockfreeStack& stack) {
     bool ok = true;
     ok = ok && stack.Push(5);
 
-    NO_INSTR(std::cout << ThreadIdx() << "; " << "Push: " << ok << std::endl);
+    NO_INSTR(std::cout << thread_id << "; " << "Push: " << ok << std::endl);
 
     int out;
     ok = ok && stack.Pop(&out);
     ok = ok && (out == 5);
 
-    NO_INSTR(std::cout << ThreadIdx() << "; " << "Pop: " << ok << "; " << out << std::endl);
+    NO_INSTR(std::cout << thread_id << "; " << "Pop: " << ok << "; " << out << std::endl);
 
     MustAlways(ok);
     RunDone();

@@ -184,13 +184,14 @@ def process_file(
     thread_idxs_from_instr: DefaultDict[Instruction, List[int]],
     thread_accesses: Set[ThreadAccess],
     memory_hints: List[Set[int]],
-    thread_idx: int,
     file_path: str,
 ):
     record_format = "<HHQ"
     record_size = struct.calcsize(record_format)
 
+    thread_idx = None
     def push_instr(instr):
+        assert thread_idx is not None
         if not instr:
             return
         frozen = instr.frozen()
@@ -231,6 +232,10 @@ def process_file(
 
                 f(memory_hints, addr, size)
                 continue
+            elif opcode == 3:
+                # Thread ID entry.
+                thread_idx = addr
+                assert thread_idx >= 0
 
             is_instruction = opcode > 2
             if is_instruction:
@@ -276,7 +281,7 @@ def get_instructions_to_instrument(
             print("skipping", filename, "cause too large:", file_size / 1024**2, "MB")
             continue
         process_file(
-            thread_idxs_from_instr, thread_accesses, memory_hints, thread_idx, file_path
+            thread_idxs_from_instr, thread_accesses, memory_hints, file_path
         )
         thread_idx += 1
 

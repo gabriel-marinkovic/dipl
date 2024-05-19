@@ -8,10 +8,12 @@ constexpr int QSIZE = 3;
 using QueueT = lockfree::spsc::Queue<uint32_t, QSIZE>;
 
 void producer(QueueT& q) {
+  int thread_id = RegisterThread(0);
+
   while (NextRun()) {
     ContiguousMemoryHint(&q, sizeof(q));
 
-    if (ThreadIdx() == 0) {
+    if (thread_id == 0) {
       q.~QueueT();
       new (&q) QueueT();
     }
@@ -30,10 +32,12 @@ void producer(QueueT& q) {
 }
 
 void consumer(QueueT& q) {
+  int thread_id = RegisterThread(1);
+
   while (NextRun()) {
     ContiguousMemoryHint(&q, sizeof(q));
 
-    if (ThreadIdx() == 0) {
+    if (thread_id == 0) {
       q.~QueueT();
       new (&q) QueueT();
     }

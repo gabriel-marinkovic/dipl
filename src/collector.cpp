@@ -56,6 +56,7 @@ enum MemoryReferenceKind : uint16_t {
   REF_KIND_READ = 0,
   REF_KIND_WRITE = 1,
   REF_KIND_MEMORY_HINT = 2,
+  REF_KIND_THREAD_IDX = 3,
 
   // `MemoryReferenceKind` values which are `REF_KIND__COUNT` are opcodes.
   REF_KIND__COUNT
@@ -88,7 +89,7 @@ static uint64_t the_total_memory_reference_count;
 static void* the_module_mutex;
 static BufferedFileWriter the_module_writer;
 
-static int volatile the_next_thread_idx;
+static bool the_thread_id_claimed[2];
 
 /* Allocated TLS slot offsets */
 enum TlsOffset {
@@ -127,6 +128,39 @@ static void WrapInstrumentationResume() {
   drwrap_replace_native_fini(drcontext);
 }
 
+static int WrapRegisterThread(int preferred_thread_id = -1) {
+  DR_ASSERT(preferred_thread_id <= 1);
+
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+
+  dr_mutex_lock(the_mutex);
+  if (preferred_thread_id < 0) {
+    for (int i = 0; i < ArrayCount(the_thread_id_claimed); ++i) {
+      if (!the_thread_id_claimed[i]) {
+        preferred_thread_id = i;
+        break;
+      }
+    }
+  }
+
+  DR_ASSERT(preferred_thread_id >= 0 && preferred_thread_id <= ArrayCount(the_thread_id_claimed));
+  DR_ASSERT(!the_thread_id_claimed[preferred_thread_id]);
+  the_thread_id_claimed[preferred_thread_id] = true;
+  data->thread_idx = preferred_thread_id;
+  dr_mutex_unlock(the_mutex);
+
+  // TODO: We assume that we have enough space in buf ptr, and we probably do, but check this better.
+  MemoryReference* current = BUF_PTR(data->tls_segment_base);
+  current->type = REF_KIND_THREAD_IDX;
+  current->size = 0;
+  current->addr = reinterpret_cast<app_pc>(data->thread_idx);
+  BUF_PTR(data->tls_segment_base) = current + 1;
+
+  drwrap_replace_native_fini(drcontext);
+  return data->thread_idx;
+}
+
 static bool WrapNextRun() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
@@ -148,13 +182,6 @@ static void WrapRunDone() {
   DR_ASSERT(IS_INSTRUMENTING(data->tls_segment_base));
   IS_INSTRUMENTING(data->tls_segment_base) = 0;
   drwrap_replace_native_fini(drcontext);
-}
-
-static int WrapThreadIdx() {
-  void* drcontext = dr_get_current_drcontext();
-  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
-  drwrap_replace_native_fini(drcontext);
-  return data->thread_idx;
 }
 
 static void WrapContiguousMemoryHint(void* ptr, int size) {
@@ -181,7 +208,7 @@ static void Memtrace(void* drcontext) {
     data->writer.WriteUint16LE(mem_ref->type);
     data->writer.WriteUint16LE(mem_ref->size);
     data->writer.WriteUint64LE(reinterpret_cast<uint64_t>(reinterpret_cast<uintptr_t>(mem_ref->addr)));
-    if (mem_ref->type != REF_KIND_READ && mem_ref->type != REF_KIND_WRITE && mem_ref->type != REF_KIND_MEMORY_HINT) {
+    if (mem_ref->type >= REF_KIND__COUNT) {
       data->writer.WriteString(Wrap(decode_opcode_name(mem_ref->type)));
     } else {
       data->writer.WriteUint64LE(0);
@@ -399,7 +426,7 @@ static void EventThreadInit(void* drcontext) {
 
   // Keep `tls_segment_base` in a per-thread data structure so we can get the TLS slot and find where the pointer points
   // to in the buffer.
-  data->thread_idx = dr_atomic_add32_return_sum(&the_next_thread_idx, 1) - 1;
+  data->thread_idx = -1;
   data->tls_segment_base = (uint8_t*)dr_get_dr_segment_base(tls_seg);
   data->buffer_base =
       (MemoryReference*)dr_raw_mem_alloc(kMemoryReferenceBufferSize, DR_MEMPROT_READ | DR_MEMPROT_WRITE, NULL);
@@ -497,9 +524,9 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   replace_native("InstrumentationPause", WrapInstrumentationPause);
   replace_native("InstrumentationResume", WrapInstrumentationResume);
   // `InstrumentingWaitForAll` in userspace.
+  replace_native("RegisterThread", WrapRegisterThread);
   replace_native("NextRun", WrapNextRun);
   replace_native("RunDone", WrapRunDone);
-  replace_native("ThreadIdx", WrapThreadIdx);
   // `MustAlways` already noop.
   // `MustAtleastOnce` already noop.
   replace_native("ContiguousMemoryHint", WrapContiguousMemoryHint);
