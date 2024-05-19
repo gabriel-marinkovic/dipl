@@ -384,8 +384,6 @@ with subprocess.Popen(cmds) as process:
                 return
     threading.Thread(target=check_deadlock, args=(process,), daemon=True).start()
     process.wait()
-    # TODO: Currently broken, some ghost process survives
-    kill_process_and_descendants(process)
 
 print("All done!")
 print(" ".join(cmds))

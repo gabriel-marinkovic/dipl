@@ -28,6 +28,7 @@ static inline void dr_atomic_store_u64(uint64_t volatile* x, uint64_t val) {
 
 // General utilities.
 static uint64_t GetElapsedMillisCoarse() {
+  // RECONSIDER: Safe to call libc?
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
   return (static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL + static_cast<uint64_t>(ts.tv_nsec)) / 1000000ULL;
@@ -76,6 +77,14 @@ static inline uint64_t NextPermutation(uint64_t v) {
 static inline uint64_t DeltaFromPermutation(uint64_t v) { return v ^ (v << 1); }
 
 // Global state.
+static bool the_trace;
+#define TRACE(code)  \
+  do {               \
+    if (the_trace) { \
+      code;          \
+    };               \
+  } while (0)
+
 static void* the_mutex;
 static client_id_t the_client_id;
 static int the_tls_idx;
@@ -240,8 +249,7 @@ static void WrapRunDone() {
   DR_ASSERT(remaining >= 0);
 
   if (remaining > 0) {
-    // CHANGE
-    // dr_printf("We are done, waiting for others: %d\n", data->thread_idx);
+    TRACE(dr_printf("We are done, waiting for others: %d\n", data->thread_idx));
     // There are still other threads running, so wake someone else.
     bool woke_someone = false;
     for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
@@ -361,14 +369,12 @@ static void ContextSwitchPoint(uintptr_t instr_addr) {
   // dr_printf("%p In context switch point: %d\n", instr_addr, data->thread_idx);
 
   if (should_switch) {
-    // CHANGE
-    // dr_printf("%d going to sleep before executing 0x%x\n", data->thread_idx, instr_addr);
+    TRACE(dr_printf("%d going to sleep before executing 0x%x\n", data->thread_idx, instr_addr));
     bool woke_someone = WakeNextThread(data);
     // DR_ASSERT(woke_someone);
   }
 
-  // CHANGE
-  // dr_printf("%d will execute 0x%x\n", data->thread_idx, instr_addr);
+  TRACE(dr_printf("%d will execute 0x%x\n", data->thread_idx, instr_addr));
 }
 
 static dr_emit_flags_t EventAppInstruction(void* drcontext, void* tag, instrlist_t* bb, instr_t* where, bool for_trace,
@@ -479,10 +485,11 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
       {"instructions_file", required_argument, 0, 'i'},
       {"exit_file",         required_argument, 0, 'e'},
       {"permutation",       required_argument, 0, 'p'},
+      {"trace",             optional_argument, 0, 't'},
       {0, 0, 0, 0}
   };
   // clang-format on
-  while ((opt = getopt_long(argc, (char**)argv, "i:p:", long_options, NULL)) != -1) {
+  while ((opt = getopt_long(argc, (char**)argv, "e:i:p:t", long_options, NULL)) != -1) {
     switch (opt) {
       case 'e':
         the_exit_path = optarg;
@@ -494,8 +501,11 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
         got_permutation = true;
         permutation = strtoull(optarg, NULL, 16);
         break;
+      case 't':
+        the_trace = true;
+        break;
       case '?':
-        fprintf(stderr, "Usage: %s [--instructions_file=<file>] [--permutation=<hex>]\n", argv[0]);
+        fprintf(stderr, "Bad CLI options.\n");
         exit(EXIT_FAILURE);
       default:
         break;
