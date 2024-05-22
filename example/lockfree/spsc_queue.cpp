@@ -10,7 +10,7 @@ using QueueT = lockfree::spsc::Queue<uint32_t, QSIZE>;
 void producer(QueueT& q) {
   int thread_id = RegisterThread(0);
 
-  while (NextRun()) {
+  while (Testing()) {
     ContiguousMemoryHint(&q, sizeof(q));
 
     if (thread_id == 0) {
@@ -24,17 +24,17 @@ void producer(QueueT& q) {
     pushed = q.Push(PreventOpt(3));
     pushed = q.Push(PreventOpt(4));
 
-    MustAlways(true);
-    MustAtleastOnce(0, !pushed);
-    MustAtleastOnce(1, pushed);
-    RunDone();
+    AssertAlways(true);
+    AssertAtleastOnce(0, !pushed);
+    AssertAtleastOnce(1, pushed);
+    RunEnd();
   }
 }
 
 void consumer(QueueT& q) {
   int thread_id = RegisterThread(1);
 
-  while (NextRun()) {
+  while (Testing()) {
     ContiguousMemoryHint(&q, sizeof(q));
 
     if (thread_id == 0) {
@@ -55,9 +55,9 @@ void consumer(QueueT& q) {
     popped = q.Pop(value);
     ok = ok && (!popped || (value != 0 && value <= 3));
 
-    MustAlways(ok);
-    MustAtleastOnce(2, popped && value == 3);
-    RunDone();
+    AssertAlways(ok);
+    AssertAtleastOnce(2, popped && value == 3);
+    RunEnd();
   }
 }
 

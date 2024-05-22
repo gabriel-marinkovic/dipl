@@ -37,19 +37,19 @@ int TEST_TOOL_FUNCTION RegisterThread(int preferred_thread_id = -1) {
   return prevent_optimization_thread_id;
 }
 
-bool TEST_TOOL_FUNCTION NextRun() {
+bool TEST_TOOL_FUNCTION Testing() {
   FN_PRELUDE;
   return prevent_optimization_literal_bool_false;
 }
 
-void TEST_TOOL_FUNCTION RunDone() { FN_PRELUDE; }
+void TEST_TOOL_FUNCTION RunEnd() { FN_PRELUDE; }
 
-void TEST_TOOL_FUNCTION MustAlways(bool ok) {
+void TEST_TOOL_FUNCTION AssertAlways(bool ok) {
   FN_PRELUDE;
   prevent_optimization_sink_bool = ok;
 }
 
-void TEST_TOOL_FUNCTION MustAtleastOnce(int condition_idx, bool ok) {
+void TEST_TOOL_FUNCTION AssertAtleastOnce(int condition_idx, bool ok) {
   FN_PRELUDE;
   prevent_optimization_sink_int = condition_idx;
   prevent_optimization_sink_bool = ok;

@@ -8,7 +8,7 @@ int volatile int_sink_prevent_optimization;
 bool volatile false_literal_prevent_optimization = false;
 int volatile one_literal_prevent_optimization = 1;
 
-extern "C" bool __attribute__((noinline)) NextRun() {
+extern "C" bool __attribute__((noinline)) Testing() {
   __asm__ __volatile__("");
   return false_literal_prevent_optimization;
 }
@@ -81,7 +81,7 @@ class Stack {
 };
 
 void test(Stack& stack) {
-  while (NextRun()) {
+  while (Testing()) {
     if (Initializing()) {
       stack.~Stack();
       new (&stack) Stack();

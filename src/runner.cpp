@@ -184,12 +184,12 @@ static int WrapRegisterThread(int preferred_thread_idx = -1) {
   return data->thread_idx;
 }
 
-static bool WrapNextRun() {
+static bool WrapTesting() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   DR_ASSERT(data->initialized_instrumentation);
 
-  // dr_printf("Hello from WrapNextRun! TID: %d\n", data->thread_idx);
+  // dr_printf("Hello from WrapTesting! TID: %d\n", data->thread_idx);
 
   if (dr_atomic_add32_return_sum(&the_threads_waiting, 1) < ArrayCount(the_threads)) {
     dr_event_wait(data->event);
@@ -236,7 +236,7 @@ static bool WrapNextRun() {
       for (int i = 0; i < ArrayCount(the_threads_successful_atleast_once); ++i) {
         if (dr_atomic_load32(&the_threads_successful_atleast_once_used[i]) &&
             !dr_atomic_load32(&the_threads_successful_atleast_once[i])) {
-          dr_printf("`MustAtleastOnce` condition with idx: %d was never true!\n", i);
+          dr_printf("`AssertAtleastOnce` condition with idx: %d was never true!\n", i);
           terminate = true;
         }
       }
@@ -255,11 +255,11 @@ static bool WrapNextRun() {
   return !done;
 }
 
-static void WrapRunDone() {
+static void WrapRunEnd() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  // dr_printf("Hello from WrapRunDone! %d TID: %d\n", result, data->thread_idx);
+  // dr_printf("Hello from WrapRunEnd! %d TID: %d\n", result, data->thread_idx);
 
   int remaining = dr_atomic_add32_return_sum(&the_threads_running, -1);
   dr_atomic_store32(&data->running, 0);
@@ -283,7 +283,7 @@ static void WrapRunDone() {
     }
     DR_ASSERT(woke_someone);
 
-    // We will wait for the next test run in `WrapNextRun`.
+    // We will wait for the next test run in `WrapTesting`.
   } else {
     int successes = dr_atomic_load32(&the_threads_successful);
     dr_atomic_store32(&the_threads_successful, 0);
@@ -331,7 +331,7 @@ static void WrapRunDone() {
   drwrap_replace_native_fini(drcontext);
 }
 
-static void WrapMustAlways(bool result) {
+static void WrapAssertAlways(bool result) {
   void* drcontext = dr_get_current_drcontext();
   if (result) {
     dr_atomic_add32_return_sum(&the_threads_successful, 1);
@@ -339,10 +339,10 @@ static void WrapMustAlways(bool result) {
   drwrap_replace_native_fini(drcontext);
 }
 
-static void WrapMustAtleastOnce(int condition_idx, bool result) {
+static void WrapAssertAtleastOnce(int condition_idx, bool result) {
   void* drcontext = dr_get_current_drcontext();
   dr_atomic_store32(&the_threads_successful_atleast_once_used[condition_idx], 1);
-  // if (result) dr_printf("WrapMustAtleastOnce: %d %d\n", condition_idx, result);
+  // if (result) dr_printf("WrapAssertAtleastOnce: %d %d\n", condition_idx, result);
   if (result) dr_atomic_store32(&the_threads_successful_atleast_once[condition_idx], 1);
   drwrap_replace_native_fini(drcontext);
 }
@@ -643,10 +643,10 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   // `InstrumentationResume` is already noop.
   replace_native("InstrumentingWaitForAll", WrapInstrumentingWaitForAll);
   replace_native("RegisterThread", WrapRegisterThread);
-  replace_native("NextRun", WrapNextRun);
-  replace_native("RunDone", WrapRunDone);
-  replace_native("MustAlways", WrapMustAlways);
-  replace_native("MustAtleastOnce", WrapMustAtleastOnce);
+  replace_native("Testing", WrapTesting);
+  replace_native("RunEnd", WrapRunEnd);
+  replace_native("AssertAlways", WrapAssertAlways);
+  replace_native("AssertAtleastOnce", WrapAssertAtleastOnce);
 
   dr_free_module_data(main_module);
 

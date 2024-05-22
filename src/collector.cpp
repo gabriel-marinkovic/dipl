@@ -161,7 +161,7 @@ static int WrapRegisterThread(int preferred_thread_id = -1) {
   return data->thread_idx;
 }
 
-static bool WrapNextRun() {
+static bool WrapTesting() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
@@ -175,7 +175,7 @@ static bool WrapNextRun() {
   return !was_instrumenting;
 }
 
-static void WrapRunDone() {
+static void WrapRunEnd() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
@@ -525,10 +525,10 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   replace_native("InstrumentationResume", WrapInstrumentationResume);
   // `InstrumentingWaitForAll` in userspace.
   replace_native("RegisterThread", WrapRegisterThread);
-  replace_native("NextRun", WrapNextRun);
-  replace_native("RunDone", WrapRunDone);
-  // `MustAlways` already noop.
-  // `MustAtleastOnce` already noop.
+  replace_native("Testing", WrapTesting);
+  replace_native("RunEnd", WrapRunEnd);
+  // `AssertAlways` already noop.
+  // `AssertAtleastOnce` already noop.
   replace_native("ContiguousMemoryHint", WrapContiguousMemoryHint);
 
   dr_free_module_data(main_module);

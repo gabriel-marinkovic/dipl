@@ -6,7 +6,7 @@
 bool volatile sink_prevent_optimization;
 bool volatile false_literal_prevent_optimization = false;
 
-extern "C" bool __attribute__((noinline)) NextRun() {
+extern "C" bool __attribute__((noinline)) Testing() {
   __asm__ __volatile__("");
   return false_literal_prevent_optimization;
 }
@@ -24,7 +24,7 @@ extern "C" void __attribute__((noinline)) ReportTestResult(bool ok) {
 std::mutex mutex;
 volatile int x;
 void test() {
-  while (NextRun()) {
+  while (Testing()) {
     if (Initializing()) {
       mutex.~mutex();
       new(&mutex) std::mutex();

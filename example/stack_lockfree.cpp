@@ -64,7 +64,7 @@ class LockfreeStack {
 void test(LockfreeStack& stack) {
   int thread_id = RegisterThread();
 
-  while (NextRun()) {
+  while (Testing()) {
     if (thread_id == 0) {
       stack.~LockfreeStack();
       new (&stack) LockfreeStack();
@@ -82,8 +82,8 @@ void test(LockfreeStack& stack) {
 
     NO_INSTR(std::cout << thread_id << "; " << "Pop: " << ok << "; " << out << std::endl);
 
-    MustAlways(ok);
-    RunDone();
+    AssertAlways(ok);
+    RunEnd();
   }
 }
 
