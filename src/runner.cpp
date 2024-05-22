@@ -274,6 +274,8 @@ static void WrapRunStart() {
   drwrap_replace_native_fini(drcontext);
 }
 
+static inline uint64_t min(uint64_t a, uint64_t b) { return a < b ? a : b; }
+
 static void WrapRunEnd() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
@@ -325,7 +327,7 @@ static void WrapRunEnd() {
     uint64_t t = GetElapsedMillisCoarse();
     dr_atomic_store_u64(&the_last_run_completed_time_ms, t);
 
-    if (the_total_run_count % (the_total_perm_count_log / 128) == 0) {
+    if (the_total_run_count % (the_total_perm_count_log / min(the_total_perm_count_log, 128)) == 0) {
       // TODO: Investigate why using floating point operations (in particular printing, with either `printf` or
       // `dr_printf`) crashes us with the `basic_passing` example.
       // https://dynamorio.org/transparency.html#sec_trans_floating_point

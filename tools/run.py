@@ -9,7 +9,7 @@ import struct
 import subprocess
 import threading
 import time
-from typing import DefaultDict, FrozenSet, List, Set, Tuple
+from typing import DefaultDict, FrozenSet, List, Mapping, Set, Tuple
 
 
 def run_command(command_name, *args, silent=False, silent_errors=False):
@@ -179,6 +179,100 @@ def parse_modules(directory) -> Tuple[Module]:
                     modules.pop(module.base, None)
     return tuple(modules.values())
 
+# a collection run has:
+    # a list of instructions, per thread id. -> comes from different files, built over time
+    # a list of memory hints
+
+@dataclasses.dataclass
+class CollectionRun:
+    instructions: Mapping[int, Instruction] = dataclasses.field(default_factory=dict)
+    accesses: List[ThreadAccess] = dataclasses.field(default_factory=list)
+    memory_hints: List[Set[int]] = dataclasses.field(default_factory=list)
+
+def process_file2(collection_runs: List[CollectionRun], file_path):
+    collection_idx = 0
+    def get_run():
+        if collection_idx >= len(collection_runs):
+            assert collection_idx == len(collection_runs)
+            collection_runs.append(CollectionRun())
+        return collection_runs[collection_idx]
+
+    run = get_run()
+    thread_idx = None
+    def push_instr(instr):
+        assert thread_idx is not None
+        if not instr: return
+        frozen = instr.frozen()
+        run.instructions[frozen.address] = frozen
+        run.accesses.append(
+            ThreadAccess(
+                thread_idx=thread_idx,
+                instr_addr=frozen.address,
+                instr_name=frozen.name,
+                read_addrs=frozen.addresses_read,
+                write_addrs=frozen.addresses_written,
+            )
+        )
+
+    record_format = "<HHQ"
+    record_size = struct.calcsize(record_format)
+    with open(file_path, "rb") as file:
+        instr = None
+        while True:
+            record_bytes = file.read(record_size)
+            if not record_bytes:
+                break
+
+            opcode, size, addr = struct.unpack(record_format, record_bytes)
+            opcode_name = read_packed_string(file)
+
+            if opcode == 2:
+                # Memory hint entry.
+                def f(memory_hints, addr, size):
+                    addrs = list(range(addr, addr + size))
+                    for addr in addrs:
+                        for block in memory_hints:
+                            if addr in block:
+                                block.update(addrs)
+                                return
+                    memory_hints.append(set(addrs))
+                f(run.memory_hints, addr, size)
+                continue
+            elif opcode == 3:
+                # Thread ID entry.
+                thread_idx = addr
+                assert thread_idx >= 0
+                continue
+
+            is_instruction = opcode > 3
+            if is_instruction:
+                push_instr(instr)
+                instr = InstructionWIP(
+                    name=opcode_name,
+                    address=addr,
+                    size=size,
+                )
+                if not instr.name:
+                    instr.name = "<UNKNOWN>"
+            else:
+                assert instr
+
+                assert len(opcode_name) == 0
+                op = Operand(is_read=(opcode == 0), address=addr, size=size)
+                if op.is_read:
+                    instr.src_ops.append(op)
+                else:
+                    instr.dst_ops.append(op)
+        push_instr(instr)
+
+def process_collection_runs(run):
+    thread_idxs_from_instr: DefaultDict[Instruction, List[int]] = collections.defaultdict(list)
+    for access in run.accesses:
+        print(access.thread_idx, access.instr_addr)
+        instr = run.instructions[access.instr_addr]
+        thread_idxs_from_instr[instr].append(access.thread_idx)
+    return thread_idxs_from_instr
+
 
 def process_file(
     thread_idxs_from_instr: DefaultDict[Instruction, List[int]],
@@ -236,8 +330,9 @@ def process_file(
                 # Thread ID entry.
                 thread_idx = addr
                 assert thread_idx >= 0
+                continue
 
-            is_instruction = opcode > 2
+            is_instruction = opcode > 3
             if is_instruction:
                 push_instr(instr)
                 instr = InstructionWIP(
@@ -269,6 +364,9 @@ def get_instructions_to_instrument(
     )
     thread_accesses: Set[ThreadAccess] = set()
     memory_hints: List[Set[int]] = []
+
+    collection_runs = []
+
     thread_idx = 0
     for filename in os.listdir(collect_directory):
         if not filename.endswith(".bin"):
@@ -283,7 +381,29 @@ def get_instructions_to_instrument(
         process_file(
             thread_idxs_from_instr, thread_accesses, memory_hints, file_path
         )
+        process_file2(collection_runs, file_path)
         thread_idx += 1
+
+    from pprint import pprint
+    pprint(collection_runs)
+
+    assert len(collection_runs) == 1
+    run = collection_runs[0]
+    thread_idxs_from_instr2 = process_collection_runs(run)
+
+    assert thread_accesses == set(run.accesses)
+    assert memory_hints == run.memory_hints
+    for instr, tids in thread_idxs_from_instr.items():
+        print(instr.address, instr.size, instr.name, tids)
+    print("------------------")
+    for instr, tids in thread_idxs_from_instr2.items():
+        print(instr.address, instr.size, instr.name, tids)
+    #assert thread_idxs_from_instr == thread_idxs_from_instr2
+    #exit()
+
+    thread_accesses = set(run.accesses)
+    memory_hints = run.memory_hints
+    thread_idxs_from_instr = thread_idxs_from_instr2
 
     def with_hints(hints, addrs):
         new_addrs = addrs.copy()
