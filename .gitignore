@@ -43,3 +43,6 @@ build
 #DynamoRIO
 DynamoRIO
 DynamoRIO_src
+
+# Project files
+collect
