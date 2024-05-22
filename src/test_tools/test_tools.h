@@ -42,6 +42,8 @@ bool TEST_TOOL_FUNCTION Testing() {
   return prevent_optimization_literal_bool_false;
 }
 
+void TEST_TOOL_FUNCTION RunStart() { FN_PRELUDE; }
+
 void TEST_TOOL_FUNCTION RunEnd() { FN_PRELUDE; }
 
 void TEST_TOOL_FUNCTION AssertAlways(bool ok) {

@@ -9,14 +9,13 @@ using QueueT = lockfree::spsc::Queue<uint32_t, QSIZE>;
 
 void producer(QueueT& q) {
   int thread_id = RegisterThread(0);
+  ContiguousMemoryHint(&q, sizeof(q));
 
   while (Testing()) {
-    ContiguousMemoryHint(&q, sizeof(q));
+    q.~QueueT();
+    new (&q) QueueT();
 
-    if (thread_id == 0) {
-      q.~QueueT();
-      new (&q) QueueT();
-    }
+    RunStart();
 
     bool pushed;
     pushed = q.Push(PreventOpt(1));
@@ -35,12 +34,7 @@ void consumer(QueueT& q) {
   int thread_id = RegisterThread(1);
 
   while (Testing()) {
-    ContiguousMemoryHint(&q, sizeof(q));
-
-    if (thread_id == 0) {
-      q.~QueueT();
-      new (&q) QueueT();
-    }
+    RunStart();
 
     bool ok = true;
     uint32_t value = 0xff;

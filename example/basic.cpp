@@ -13,6 +13,8 @@ void test() {
       x = 0;
     }
 
+    RunStart();
+
     int tmp1 = x.load(std::memory_order_seq_cst);
     x.store(tmp1 + 1, std::memory_order_seq_cst);
 

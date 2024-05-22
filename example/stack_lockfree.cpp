@@ -71,6 +71,8 @@ void test(LockfreeStack& stack) {
       the_hacky_bump_allocator_next.store(0, std::memory_order_seq_cst);
     }
 
+    RunStart();
+
     bool ok = true;
     ok = ok && stack.Push(5);
 

@@ -14,6 +14,8 @@ void test() {
       x = 0;
     }
 
+    RunStart();
+
     x.fetch_add(1, std::memory_order_seq_cst);
     x.fetch_add(-1, std::memory_order_seq_cst);
 

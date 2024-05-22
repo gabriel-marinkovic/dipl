@@ -164,15 +164,18 @@ static int WrapRegisterThread(int preferred_thread_id = -1) {
 static bool WrapTesting() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
-
-  bool was_instrumenting = data->entered_instrumentation;
-  if (!was_instrumenting) {
-    DR_ASSERT(IS_INSTRUMENTING(data->tls_segment_base) == 0);
-    IS_INSTRUMENTING(data->tls_segment_base) = 1;
-  }
-  data->entered_instrumentation = true;
   drwrap_replace_native_fini(drcontext);
-  return !was_instrumenting;
+  return !data->entered_instrumentation;
+}
+
+static void WrapRunStart() {
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+  DR_ASSERT(!data->entered_instrumentation);
+  data->entered_instrumentation = true;
+  DR_ASSERT(IS_INSTRUMENTING(data->tls_segment_base) == 0);
+  IS_INSTRUMENTING(data->tls_segment_base) = 1;
+  drwrap_replace_native_fini(drcontext);
 }
 
 static void WrapRunEnd() {
@@ -526,6 +529,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   // `InstrumentingWaitForAll` in userspace.
   replace_native("RegisterThread", WrapRegisterThread);
   replace_native("Testing", WrapTesting);
+  replace_native("RunStart", WrapRunStart);
   replace_native("RunEnd", WrapRunEnd);
   // `AssertAlways` already noop.
   // `AssertAtleastOnce` already noop.

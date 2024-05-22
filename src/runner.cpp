@@ -187,6 +187,33 @@ static int WrapRegisterThread(int preferred_thread_idx = -1) {
 static bool WrapTesting() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+
+  if (dr_atomic_add32_return_sum(&the_threads_waiting, 1) < ArrayCount(the_threads)) {
+    dr_event_wait(data->event);
+    dr_event_reset(data->event);
+  } else {
+    dr_atomic_store32(&the_threads_waiting, 0);
+
+    for (ThreadData* other : the_threads) {
+      if (other == data) continue;
+      dr_event_signal(other->event);
+    }
+  }
+
+  bool done = dr_atomic_load32(&the_done) != 0;
+  if (done) {
+    // Cleanup this thread's resources.
+    dr_event_destroy(data->event);
+    data->event = NULL;
+  }
+
+  drwrap_replace_native_fini(drcontext);
+  return !done;
+}
+
+static void WrapRunStart() {
+  void* drcontext = dr_get_current_drcontext();
+  ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   DR_ASSERT(data->initialized_instrumentation);
 
   // dr_printf("Hello from WrapTesting! TID: %d\n", data->thread_idx);
@@ -211,7 +238,7 @@ static bool WrapTesting() {
     DR_ASSERT(data->event);
     dr_atomic_store32(&the_threads_running, ArrayCount(the_threads));
 
-    if (the_current_perm <= the_last_perm) {
+    if (the_current_perm < the_last_perm) {
       the_switch_mask = DeltaFromPermutation(the_current_perm);
       dr_atomic_store_u64(&the_current_perm_log, the_current_perm);
       dr_atomic_store_u64(&the_switch_mask_log, the_switch_mask);
@@ -244,15 +271,7 @@ static bool WrapTesting() {
     }
   }
 
-  bool done = dr_atomic_load32(&the_done) != 0;
-  if (done) {
-    // Cleanup this thread's resources.
-    dr_event_destroy(data->event);
-    data->event = NULL;
-  }
-
   drwrap_replace_native_fini(drcontext);
-  return !done;
 }
 
 static void WrapRunEnd() {
@@ -644,6 +663,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   replace_native("InstrumentingWaitForAll", WrapInstrumentingWaitForAll);
   replace_native("RegisterThread", WrapRegisterThread);
   replace_native("Testing", WrapTesting);
+  replace_native("RunStart", WrapRunStart);
   replace_native("RunEnd", WrapRunEnd);
   replace_native("AssertAlways", WrapAssertAlways);
   replace_native("AssertAtleastOnce", WrapAssertAtleastOnce);
