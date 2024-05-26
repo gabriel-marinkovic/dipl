@@ -187,9 +187,13 @@ static void WrapRunEnd() {
   drwrap_replace_native_fini(drcontext);
 }
 
-static void WrapContiguousMemoryHint(void* ptr, int size) {
+// NOTE: `drwrap_replace_native` API only supports one argument functions, so arguments must be packed.
+static void WrapContiguousMemoryHintInternal(void** bytes) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+
+  void* ptr = bytes[0];
+  int size = static_cast<int>(reinterpret_cast<uintptr_t>(bytes[1]));
 
   // TODO: Lame assert.
   DR_ASSERT(size <= 65535);
@@ -533,7 +537,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   replace_native("RunEnd", WrapRunEnd);
   // `AssertAlways` already noop.
   // `AssertAtleastOnce` already noop.
-  replace_native("ContiguousMemoryHint", WrapContiguousMemoryHint);
+  replace_native("ContiguousMemoryHintInternal", WrapContiguousMemoryHintInternal);
 
   dr_free_module_data(main_module);
 

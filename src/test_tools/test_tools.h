@@ -57,10 +57,13 @@ void TEST_TOOL_FUNCTION AssertAtleastOnce(int condition_idx, bool ok) {
   prevent_optimization_sink_bool = ok;
 }
 
-void TEST_TOOL_FUNCTION ContiguousMemoryHint(void* ptr, int size) {
+void TEST_TOOL_FUNCTION ContiguousMemoryHintInternal(void** bytes) {
   FN_PRELUDE;
-  prevent_optimization_sink_voidptr = ptr;
-  prevent_optimization_sink_int = size;
+  void** volatile prevent_opt = bytes;
+}
+void ContiguousMemoryHint(void* ptr, int size) {
+  void* data[2] = {ptr, (void*)size};
+  ContiguousMemoryHintInternal(data);
 }
 
 #define NO_INSTR(code)      \
