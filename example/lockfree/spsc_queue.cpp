@@ -4,7 +4,7 @@
 #include "test_tools.h"
 #include "lockfree.hpp"
 
-constexpr int QSIZE = 3;
+constexpr int QSIZE = 4;
 using QueueT = lockfree::spsc::Queue<uint32_t, QSIZE>;
 
 void producer(QueueT& q) {
@@ -21,11 +21,8 @@ void producer(QueueT& q) {
     pushed = q.Push(PreventOpt(1));
     pushed = q.Push(PreventOpt(2));
     pushed = q.Push(PreventOpt(3));
-    pushed = q.Push(PreventOpt(4));
 
-    AssertAlways(true);
-    AssertAtleastOnce(0, !pushed);
-    AssertAtleastOnce(1, pushed);
+    AssertAlways(pushed);
     RunEnd();
   }
 }
@@ -50,7 +47,7 @@ void consumer(QueueT& q) {
     ok = ok && (!popped || (value != 0 && value <= 3));
 
     AssertAlways(ok);
-    AssertAtleastOnce(2, popped && value == 3);
+    AssertAtleastOnce(0, popped && value == 3);
     RunEnd();
   }
 }
