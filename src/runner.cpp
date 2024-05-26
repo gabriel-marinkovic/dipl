@@ -205,6 +205,16 @@ static bool WrapTesting() {
     // Cleanup this thread's resources.
     dr_event_destroy(data->event);
     data->event = NULL;
+
+    if (data->thread_idx == 0) {
+      // We are done, so check `AssertAtleastOnce` instances.
+      for (int i = 0; i < ArrayCount(the_threads_successful_atleast_once); ++i) {
+        if (dr_atomic_load32(&the_threads_successful_atleast_once_used[i]) &&
+            !dr_atomic_load32(&the_threads_successful_atleast_once[i])) {
+          dr_printf("`AssertAtleastOnce` condition with idx: %d was never true!\n", i);
+        }
+      }
+    }
   }
 
   drwrap_replace_native_fini(drcontext);
@@ -238,36 +248,19 @@ static void WrapRunStart() {
     DR_ASSERT(data->event);
     dr_atomic_store32(&the_threads_running, ArrayCount(the_threads));
 
-    if (the_current_perm < the_last_perm) {
-      the_switch_mask = DeltaFromPermutation(the_current_perm);
-      dr_atomic_store_u64(&the_current_perm_log, the_current_perm);
-      dr_atomic_store_u64(&the_switch_mask_log, the_switch_mask);
-      the_current_perm = NextPermutation(the_current_perm);
+    the_switch_mask = DeltaFromPermutation(the_current_perm);
+    dr_atomic_store_u64(&the_current_perm_log, the_current_perm);
+    dr_atomic_store_u64(&the_switch_mask_log, the_switch_mask);
+    the_current_perm = NextPermutation(the_current_perm);
 
-      // dr_printf("Using mask 0b");
-      // PrintBinary(the_switch_mask_log, the_instrumented_instrs.count * 2);
-      // dr_printf(" (0b");
-      // PrintBinary(the_current_perm_log, the_instrumented_instrs.count * 2);
-      // dr_printf(")\n");
-    } else {
+    // dr_printf("Using mask 0b");
+    // PrintBinary(the_switch_mask_log, the_instrumented_instrs.count * 2);
+    // dr_printf(" (0b");
+    // PrintBinary(the_current_perm_log, the_instrumented_instrs.count * 2);
+    // dr_printf(")\n");
+
+    if (the_current_perm >= the_last_perm) {
       dr_atomic_store32(&the_done, 1);
-
-      for (ThreadData* other : the_threads) {
-        if (other == data) continue;
-        DR_ASSERT(other);
-        DR_ASSERT(dr_atomic_load32(&other->running));
-        dr_event_signal(other->event);
-      }
-
-      bool terminate = false;
-      for (int i = 0; i < ArrayCount(the_threads_successful_atleast_once); ++i) {
-        if (dr_atomic_load32(&the_threads_successful_atleast_once_used[i]) &&
-            !dr_atomic_load32(&the_threads_successful_atleast_once[i])) {
-          dr_printf("`AssertAtleastOnce` condition with idx: %d was never true!\n", i);
-          terminate = true;
-        }
-      }
-      if (terminate) BestEffortAbort();
     }
   }
 
