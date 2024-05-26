@@ -188,6 +188,9 @@ static bool WrapTesting() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
+  // TODO: INCORRECT!
+  // We MUST let thread 0 go over this first, and all other threads MUST sleep while this is happening.
+  // Only in this way can thread 0 initialize any data.
   if (dr_atomic_add32_return_sum(&the_threads_waiting, 1) < ArrayCount(the_threads)) {
     dr_event_wait(data->event);
     dr_event_reset(data->event);
