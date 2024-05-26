@@ -62,7 +62,7 @@ void TEST_TOOL_FUNCTION ContiguousMemoryHintInternal(void** bytes) {
   void** volatile prevent_opt = bytes;
 }
 void ContiguousMemoryHint(void* ptr, int size) {
-  void* data[2] = {ptr, (void*)size};
+  void* data[2] = {ptr, reinterpret_cast<void*>(size)};
   ContiguousMemoryHintInternal(data);
 }
 

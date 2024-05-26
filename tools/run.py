@@ -189,7 +189,7 @@ class CollectionRun:
     accesses: List[ThreadAccess] = dataclasses.field(default_factory=list)
     memory_hints: List[Set[int]] = dataclasses.field(default_factory=list)
 
-def process_file2(collection_runs: List[CollectionRun], file_path):
+def process_file(collection_runs: List[CollectionRun], file_path):
     collection_idx = 0
     def get_run():
         if collection_idx >= len(collection_runs):
@@ -265,109 +265,46 @@ def process_file2(collection_runs: List[CollectionRun], file_path):
                     instr.dst_ops.append(op)
         push_instr(instr)
 
-def process_collection_runs(run):
-    thread_idxs_from_instr: DefaultDict[Instruction, List[int]] = collections.defaultdict(list)
-    for access in run.accesses:
-        print(access.thread_idx, access.instr_addr)
-        instr = run.instructions[access.instr_addr]
-        thread_idxs_from_instr[instr].append(access.thread_idx)
-    return thread_idxs_from_instr
 
+def process_run(run):
+    def with_hints(addrs):
+        new_addrs = addrs.copy()
+        for block in run.memory_hints:
+            if new_addrs & block:
+                new_addrs |= block
+        return new_addrs
 
-def process_file(
-    thread_idxs_from_instr: DefaultDict[Instruction, List[int]],
-    thread_accesses: Set[ThreadAccess],
-    memory_hints: List[Set[int]],
-    file_path: str,
-):
-    record_format = "<HHQ"
-    record_size = struct.calcsize(record_format)
-
-    thread_idx = None
-    def push_instr(instr):
-        assert thread_idx is not None
-        if not instr:
-            return
-        frozen = instr.frozen()
-        for op in frozen.src_ops + frozen.dst_ops:
-            thread_idxs_from_instr[frozen].append(thread_idx)
-        if frozen.name == "syscall":
-            thread_idxs_from_instr[frozen].append(thread_idx)
-        thread_accesses.add(
-            ThreadAccess(
-                thread_idx=thread_idx,
-                instr_addr=frozen.address,
-                instr_name=frozen.name,
-                read_addrs=frozen.addresses_read,
-                write_addrs=frozen.addresses_written,
+    instructions_doing_shared_access = set()
+    shared_memory = set()
+    for a1 in run.accesses:
+        for a2 in run.accesses:
+            if a1.thread_idx == a2.thread_idx:
+                continue
+            mem_intersection = (
+                with_hints(a1.write_addrs) & with_hints(a2.read_addrs)) | (
+                with_hints(a2.write_addrs) & with_hints(a1.read_addrs)
             )
-        )
+            shared_memory.update(mem_intersection)
+            if len(mem_intersection) > 0:
+                instructions_doing_shared_access.add((a1.instr_addr, a1.instr_name))
+                instructions_doing_shared_access.add((a2.instr_addr, a2.instr_name))
 
-    with open(file_path, "rb") as file:
-        instr = None
-        while True:
-            record_bytes = file.read(record_size)
-            if not record_bytes:
-                break
+    access_count_per_instruction_address = collections.defaultdict(collections.Counter)
+    for a in run.accesses:
+        assert (a.thread_idx == 0 or a.thread_idx == 1) and "2 thread limit"
+        access_count_per_instruction_address[a.instr_addr][a.thread_idx] += 1
 
-            opcode, size, addr = struct.unpack(record_format, record_bytes)
-            opcode_name = read_packed_string(file)
-
-            if opcode == 2:
-                # Memory hint entry.
-                def f(memory_hints, addr, size):
-                    addrs = list(range(addr, addr + size))
-                    for addr in addrs:
-                        for block in memory_hints:
-                            if addr in block:
-                                block.update(addrs)
-                                return
-                    memory_hints.append(set(addrs))
-
-                f(memory_hints, addr, size)
-                continue
-            elif opcode == 3:
-                # Thread ID entry.
-                thread_idx = addr
-                assert thread_idx >= 0
-                continue
-
-            is_instruction = opcode > 3
-            if is_instruction:
-                push_instr(instr)
-                instr = InstructionWIP(
-                    name=opcode_name,
-                    address=addr,
-                    size=size,
-                )
-                if not instr.name:
-                    instr.name = "<UNKNOWN>"
-            else:
-                assert instr
-
-                assert len(opcode_name) == 0
-                op = Operand(is_read=(opcode == 0), address=addr, size=size)
-                if op.is_read:
-                    instr.src_ops.append(op)
-                else:
-                    instr.dst_ops.append(op)
-        push_instr(instr)
-
+    instrs_final = []
+    for addr, name in sorted(instructions_doing_shared_access):
+        c0 = access_count_per_instruction_address[addr][0]
+        c1 = access_count_per_instruction_address[addr][1]
+        instrs_final.append((addr, name, c0, c1))
+    return instrs_final
 
 def get_instructions_to_instrument(
     collect_directory: str,
 ) -> List[InstructionToInstrument]:
-    modules = parse_modules(collect_directory)
-
-    thread_idxs_from_instr: DefaultDict[Instruction, List[int]] = (
-        collections.defaultdict(list)
-    )
-    thread_accesses: Set[ThreadAccess] = set()
-    memory_hints: List[Set[int]] = []
-
     collection_runs = []
-
-    thread_idx = 0
     for filename in os.listdir(collect_directory):
         if not filename.endswith(".bin"):
             continue
@@ -378,69 +315,26 @@ def get_instructions_to_instrument(
         if file_size > 1024**2:
             print("skipping", filename, "cause too large:", file_size / 1024**2, "MB")
             continue
-        process_file(
-            thread_idxs_from_instr, thread_accesses, memory_hints, file_path
-        )
-        process_file2(collection_runs, file_path)
-        thread_idx += 1
+        process_file(collection_runs, file_path)
 
-    from pprint import pprint
-    pprint(collection_runs)
+    addrs = {}
+    for run_idx, run in enumerate(collection_runs):
+        instrs = process_run(run)
+        for addr, name, c0, c1 in instrs:
+            if addr in addrs:
+                _, _, c00, c01 = addrs[addr]
+                if c00 != c0 or c01 != c1:
+                    print("WARNING: another run got a different count for instr:", addr, name)
+                c0 = max(c0, c00)
+                c1 = max(c1, c01)
+            elif run_idx > 0:
+                print("WARNING: run", run_idx, "added a new instruction:", addr, name)
+            addrs[addr] = (addr, name, c0, c1)
 
-    assert len(collection_runs) == 1
-    run = collection_runs[0]
-    thread_idxs_from_instr2 = process_collection_runs(run)
-
-    assert thread_accesses == set(run.accesses)
-    assert memory_hints == run.memory_hints
-    for instr, tids in thread_idxs_from_instr.items():
-        print(instr.address, instr.size, instr.name, tids)
-    print("------------------")
-    for instr, tids in thread_idxs_from_instr2.items():
-        print(instr.address, instr.size, instr.name, tids)
-    #assert thread_idxs_from_instr == thread_idxs_from_instr2
-    #exit()
-
-    thread_accesses = set(run.accesses)
-    memory_hints = run.memory_hints
-    thread_idxs_from_instr = thread_idxs_from_instr2
-
-    def with_hints(hints, addrs):
-        new_addrs = addrs.copy()
-        for block in memory_hints:
-            if new_addrs & block:
-                new_addrs |= block
-        return new_addrs
-
-    shared_memory = set()
-    for a1 in thread_accesses:
-        for a2 in thread_accesses:
-            if a1.thread_idx == a2.thread_idx:
-                continue
-            mem_intersection = (
-                with_hints(memory_hints, a1.write_addrs)
-                & with_hints(memory_hints, a2.read_addrs)
-            ) | (
-                with_hints(memory_hints, a2.write_addrs)
-                & with_hints(memory_hints, a1.read_addrs)
-            )
-            shared_memory.update(mem_intersection)
-    print(f"{len(shared_memory)=}")
-
-    truly_shared_instruction_addresses = set()
-    for instr in thread_idxs_from_instr.keys():
-        if (instr.addresses_touched & shared_memory) or instr.name == "syscall":
-            truly_shared_instruction_addresses.add((instr.address, instr.name))
-    print(f"{len(truly_shared_instruction_addresses)=}")
-
-    access_count_per_instruction_address = {}
-    for instr, thread_idxs in thread_idxs_from_instr.items():
-        counter = collections.Counter(thread_idxs)
-        assert any(thread_idx in counter for thread_idx in [0, 1]) and "2 thread limit"
-        access_count_per_instruction_address[instr.address] = counter
+    modules = parse_modules(collect_directory)
 
     instrumented = []
-    for addr, name in sorted(truly_shared_instruction_addresses):
+    for addr, name, c0, c1 in sorted(addrs.values()):
         min_addr = float("inf")
         min_idx = -1
         for i in range(len(modules)):
@@ -469,15 +363,15 @@ def get_instructions_to_instrument(
                 module=module,
                 name=name,
                 offset=offset,
-                access_count1=access_count_per_instruction_address[addr][0],
-                access_count2=access_count_per_instruction_address[addr][1],
+                access_count1=c0,
+                access_count2=c1,
                 addr2line_output=addr2line,
             )
         )
 
         print(
             "{: <64}{: <12}0x{:x} ({} times)".format(
-                module.path, name, offset, access_count_per_instruction_address[addr]
+                module.path, name, offset, c0 + c1,
             )
         )
 
