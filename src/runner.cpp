@@ -188,18 +188,16 @@ static bool WrapTesting() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  // TODO: INCORRECT!
-  // We MUST let thread 0 go over this first, and all other threads MUST sleep while this is happening.
-  // Only in this way can thread 0 initialize any data.
   if (dr_atomic_add32_return_sum(&the_threads_waiting, 1) < ArrayCount(the_threads)) {
     dr_event_wait(data->event);
     dr_event_reset(data->event);
   } else {
     dr_atomic_store32(&the_threads_waiting, 0);
 
-    for (ThreadData* other : the_threads) {
-      if (other == data) continue;
-      dr_event_signal(other->event);
+    if (data->thread_idx != 0) {
+      dr_event_signal(the_threads[0]->event);
+      dr_event_wait(data->event);
+      dr_event_reset(data->event);
     }
   }
 
@@ -210,7 +208,12 @@ static bool WrapTesting() {
     data->event = NULL;
 
     if (data->thread_idx == 0) {
-      // We are done, so check `AssertAtleastOnce` instances.
+      // We are done, unblock all other threads and check `AssertAtleastOnce` instances.
+      for (ThreadData* other : the_threads) {
+        if (other == data) continue;
+        dr_event_signal(data->event);
+      }
+
       for (int i = 0; i < ArrayCount(the_threads_successful_atleast_once); ++i) {
         if (dr_atomic_load32(&the_threads_successful_atleast_once_used[i]) &&
             !dr_atomic_load32(&the_threads_successful_atleast_once[i])) {
@@ -220,6 +223,7 @@ static bool WrapTesting() {
     }
   }
 
+  TRACE(printf("Leaving WrapTesting: %ld\n", data->thread_idx));
   drwrap_replace_native_fini(drcontext);
   return !done;
 }
@@ -229,17 +233,23 @@ static void WrapRunStart() {
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   DR_ASSERT(data->initialized_instrumentation);
 
-  // dr_printf("Hello from WrapTesting! TID: %d\n", data->thread_idx);
+  TRACE(printf("Hello from WrapRunStart! TID: %ld\n", data->thread_idx));
 
-  if (dr_atomic_add32_return_sum(&the_threads_waiting, 1) < ArrayCount(the_threads)) {
+  int threads_waiting = dr_atomic_add32_return_sum(&the_threads_waiting, 1);
+  if (threads_waiting < ArrayCount(the_threads)) {
+    DR_ASSERT(threads_waiting > 1 || data->thread_idx == 0);
+
+    int64_t next_idx = (data->thread_idx + 1) % ArrayCount(the_threads);
+    ThreadData* next = the_threads[next_idx];
+    dr_event_signal(next->event);
+
     dr_event_wait(data->event);
     dr_event_reset(data->event);
   } else {
-    if (data->thread_idx != 0) {
-      dr_event_signal(the_threads[0]->event);
-      dr_event_wait(data->event);
-      dr_event_reset(data->event);
-    }
+    DR_ASSERT(data->thread_idx != 0);
+    dr_event_signal(the_threads[0]->event);
+    dr_event_wait(data->event);
+    dr_event_reset(data->event);
   }
 
   if (data->thread_idx == 0) {
@@ -267,6 +277,9 @@ static void WrapRunStart() {
     }
   }
 
+  TRACE(printf("Leaving WrapRunStart TID: %ld\n", data->thread_idx));
+
+  // TODO: Thread 0 will always start from WrapRunStart.
   drwrap_replace_native_fini(drcontext);
 }
 
