@@ -189,6 +189,7 @@ static bool WrapTesting() {
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
   if (dr_atomic_add32_return_sum(&the_threads_waiting, 1) < ArrayCount(the_threads)) {
+    TRACE(printf("Sleeping in WrapTesting: %ld\n", data->thread_idx));
     dr_event_wait(data->event);
     dr_event_reset(data->event);
   } else {

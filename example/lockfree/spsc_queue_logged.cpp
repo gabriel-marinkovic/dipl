@@ -1,7 +1,9 @@
 #include <cstdint>
 #include <thread>
 #include <iostream>
+#define private public
 #include "lockfree.hpp"
+#undef private
 #include "test_tools.h"
 
 constexpr int QSIZE = 4;
@@ -42,15 +44,21 @@ void consumer(QueueT& q) {
 
     popped = q.Pop(value);
     ok = ok && (!popped || (value != 0 && value == 1));
-    NO_INSTR(std::cout << "consumer pop #1: " << popped << ", value: " << value << std::endl);
+    auto r = q._r.load(std::memory_order_seq_cst);
+    auto w = q._w.load(std::memory_order_seq_cst);
+    NO_INSTR(std::cout << "consumer pop #1: " << popped << ", value: " << value << " r: " << r << " w: " << w << std::endl);
 
     popped = q.Pop(value);
     ok = ok && (!popped || (value != 0 && value <= 2));
-    NO_INSTR(std::cout << "consumer pop #2: " << popped << ", value: " << value << std::endl);
+    r = q._r.load(std::memory_order_seq_cst);
+    w = q._w.load(std::memory_order_seq_cst);
+    NO_INSTR(std::cout << "consumer pop #2: " << popped << ", value: " << value << " r: " << r << " w: " << w << std::endl);
 
     popped = q.Pop(value);
     ok = ok && (!popped || (value != 0 && value <= 3));
-    NO_INSTR(std::cout << "consumer pop #3: " << popped << ", value: " << value << std::endl);
+    r = q._r.load(std::memory_order_seq_cst);
+    w = q._w.load(std::memory_order_seq_cst);
+    NO_INSTR(std::cout << "consumer pop #3: " << popped << ", value: " << value << " r: " << r << " w: " << w << std::endl);
 
     AssertAlways(ok);
     AssertAtleastOnce(0, popped && value == 3);
