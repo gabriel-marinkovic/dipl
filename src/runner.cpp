@@ -188,26 +188,8 @@ static bool WrapTesting() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  if (dr_atomic_add32_return_sum(&the_threads_waiting, 1) < ArrayCount(the_threads)) {
-    TRACE(printf("Sleeping in WrapTesting: %ld\n", data->thread_idx));
-    dr_event_wait(data->event);
-    dr_event_reset(data->event);
-  } else {
-    dr_atomic_store32(&the_threads_waiting, 0);
-
-    if (data->thread_idx != 0) {
-      dr_event_signal(the_threads[0]->event);
-      dr_event_wait(data->event);
-      dr_event_reset(data->event);
-    }
-  }
-
   bool done = dr_atomic_load32(&the_done) != 0;
   if (done) {
-    // Cleanup this thread's resources.
-    dr_event_destroy(data->event);
-    data->event = NULL;
-
     if (data->thread_idx == 0) {
       // We are done, unblock all other threads and check `AssertAtleastOnce` instances.
       for (ThreadData* other : the_threads) {
@@ -222,10 +204,29 @@ static bool WrapTesting() {
         }
       }
     }
+
+    // Cleanup this thread's resources.
+    dr_event_destroy(data->event);
+    data->event = NULL;
+  } else {
+    if (dr_atomic_add32_return_sum(&the_threads_waiting, 1) < ArrayCount(the_threads)) {
+      TRACE(printf("Sleeping in WrapTesting: %ld\n", data->thread_idx));
+      dr_event_wait(data->event);
+      dr_event_reset(data->event);
+    } else {
+      dr_atomic_store32(&the_threads_waiting, 0);
+
+      if (data->thread_idx != 0) {
+        dr_event_signal(the_threads[0]->event);
+        dr_event_wait(data->event);
+        dr_event_reset(data->event);
+      }
+    }
   }
 
   TRACE(printf("Leaving WrapTesting: %ld\n", data->thread_idx));
   drwrap_replace_native_fini(drcontext);
+
   return !done;
 }
 
