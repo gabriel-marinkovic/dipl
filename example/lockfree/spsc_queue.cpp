@@ -48,7 +48,7 @@ void consumer(QueueT& q) {
     ok = ok && (!popped || (value != 0 && value <= 3));
 
     AssertAlways(ok);
-    AssertAtleastOnce(3, !popped);
+    AssertAtleastOnce(2, !popped);
     AssertAtleastOnce(3, popped && value == 3);
     RunEnd();
   }

@@ -15,3 +15,9 @@ target_link_libraries(spsc_queue PRIVATE lockfree)
 
 add_executable(spsc_queue_logged spsc_queue_logged.cpp)
 target_link_libraries(spsc_queue_logged PRIVATE lockfree)
+
+add_executable(spsc_ring_buffer spsc_ring_buffer.cpp)
+target_link_libraries(spsc_ring_buffer PRIVATE lockfree)
+
+add_executable(spsc_ring_buffer2 spsc_ring_buffer2.cpp)
+target_link_libraries(spsc_ring_buffer2 PRIVATE lockfree)
