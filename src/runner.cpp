@@ -152,7 +152,6 @@ static void BestEffortAbort() {
 }
 
 // `Wrap*` functions.
-static void WrapInstrumentingWaitForAll() {}
 
 static int WrapRegisterThread(int preferred_thread_idx = -1) {
   void* drcontext = dr_get_current_drcontext();
@@ -673,7 +672,6 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   // `Instrumenting` is already `return false`.
   // `InstrumentationPause` is already noop.
   // `InstrumentationResume` is already noop.
-  replace_native("InstrumentingWaitForAll", WrapInstrumentingWaitForAll);
   replace_native("RegisterThread", WrapRegisterThread);
   replace_native("Testing", WrapTesting);
   replace_native("RunStart", WrapRunStart);
