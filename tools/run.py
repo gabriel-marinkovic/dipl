@@ -386,16 +386,21 @@ parser.add_argument("test_executable", help="Path to the test executable")
 parser.add_argument(
     "-c",
     "--collect_dir",
-    default="./collect",
+    default="collect",
     help="Directory which will contain collected instrumentation data",
 )
 parser.add_argument(
-    "--dynamorio_dir", default="./DynamoRIO", help="`DynamoRIO` installation directory"
+    "--dynamorio_dir", default="DynamoRIO", help="`DynamoRIO` installation directory"
 )
 parser.add_argument(
     "--dynamorio_clients_dir",
-    default="./build/src",
+    default="build/src",
     help="Directory which contains `libcollector.so` and `librunner.so`",
+)
+parser.add_argument(
+    "--collection_run_count",
+    default=1000,
+    help="How many times to repeat the collection step",
 )
 parser.add_argument(
     "-t",
@@ -433,6 +438,7 @@ run_command(
     os.path.join(args.dynamorio_dir, "bin64/drrun"),
     "-c",
     os.path.join(args.dynamorio_clients_dir, "libcollector.so"),
+    "--run_count", str(args.collection_run_count),
     "--",
     args.test_executable,
     silent_errors=True,

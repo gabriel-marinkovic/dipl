@@ -36,6 +36,7 @@
  * DAMAGE.
  */
 
+#include <getopt.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -89,9 +90,18 @@ struct ThreadData {
 static ThreadData* the_threads[2];
 
 static int volatile the_done;
-static int volatile spinlock_barrier;
+static int volatile the_spinlock_barrier;
 static int volatile the_threads_waiting;
-static int volatile the_collection_runs_remaining = 1000;
+static int volatile the_collection_runs_remaining;
+
+// Global state.
+static bool the_trace;
+#define TRACE(code)  \
+  do {               \
+    if (the_trace) { \
+      code;          \
+    };               \
+  } while (0)
 
 static void* the_mutex;
 static client_id_t the_client_id;
@@ -112,8 +122,6 @@ static int the_tls_idx;
 #define TLS_SLOT(tls_base, enum_val) (void**)((uint8_t*)(tls_base) + tls_offs + (enum_val) * sizeof(void*))
 #define BUF_PTR(tls_base) *(MemoryReference**)TLS_SLOT(tls_base, TLS_OFFSET_BUF_PTR)
 #define IS_INSTRUMENTING(tls_base) *(uintptr_t*)TLS_SLOT(tls_base, TLS_OFFSET_IS_INSTRUMENTING)
-
-#define TRACE(code)
 
 // `Wrap*` functions.
 static bool WrapInstrumenting() {
@@ -217,7 +225,7 @@ static void WrapRunStart() {
 
   if (data->thread_idx == 0) {
     // Reset spinlock.
-    dr_atomic_store32(&spinlock_barrier, 0);
+    dr_atomic_store32(&the_spinlock_barrier, 0);
 
     if (dr_atomic_add32_return_sum(&the_collection_runs_remaining, -1) <= 0) {
       dr_atomic_store32(&the_done, 1);
@@ -238,8 +246,8 @@ static void WrapRunStart() {
 
   TRACE(printf("Leaving WrapRunStart TID, spinning first tho: %ld\n", data->thread_idx));
 
-  dr_atomic_add32_return_sum(&spinlock_barrier, 1);
-  while (dr_atomic_load32(&spinlock_barrier) < ArrayCount(the_threads)) asm("pause");
+  dr_atomic_add32_return_sum(&the_spinlock_barrier, 1);
+  while (dr_atomic_load32(&the_spinlock_barrier) < ArrayCount(the_threads)) asm("pause");
 
   drwrap_replace_native_fini(drcontext);
 }
@@ -570,6 +578,39 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   if (!drmgr_init() || drreg_init(&ops) != DRREG_SUCCESS || !drutil_init() || !drwrap_init() || !drx_init() ||
       drsym_init(0) != DRSYM_SUCCESS)
     DR_ASSERT(false);
+
+  bool got_run_count = false;
+  uint64_t run_count = 0;
+  int opt;
+  // clang-format off
+  static struct option long_options[] = {
+      {"run_count", required_argument, 0, 'n'},
+      {"trace",     optional_argument, 0, 't'},
+      {0, 0, 0, 0}
+  };
+  // clang-format on
+  while ((opt = getopt_long(argc, (char**)argv, "n:t", long_options, NULL)) != -1) {
+    switch (opt) {
+      case 'n':
+        got_run_count = true;
+        run_count = strtoull(optarg, NULL, 10);
+        break;
+      case 't':
+        the_trace = true;
+        break;
+      case '?':
+        fprintf(stderr, "Bad CLI options.\n");
+        exit(EXIT_FAILURE);
+      default:
+        break;
+    }
+  }
+
+  if (!got_run_count || run_count == 0) {
+    fprintf(stderr, "Expected a run count.\n");
+    exit(EXIT_FAILURE);
+  }
+  the_collection_runs_remaining = run_count;
 
   dr_register_exit_event(EventExit);
   if (!drmgr_register_thread_init_event(EventThreadInit) || !drmgr_register_thread_exit_event(EventThreadExit) ||
