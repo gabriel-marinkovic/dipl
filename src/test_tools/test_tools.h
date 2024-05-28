@@ -1,70 +1,29 @@
 #pragma once
 
-#include <barrier>
-
 #define TEST_TOOL_FUNCTION __attribute__((noinline, used))
-#define FN_PRELUDE __asm__ __volatile__("" ::: "memory")
+#define COMPILER_FENCE __asm__ __volatile__("" ::: "memory")
 
-volatile bool prevent_optimization_literal_bool_false = false;
-volatile int prevent_optimization_literal_int_minus_one = -1;
-volatile bool prevent_optimization_sink_bool;
-volatile int prevent_optimization_sink_int;
-volatile void* prevent_optimization_sink_voidptr;
+#define FENCE_WRAPPER(return_type, expr)     \
+  (__extension__({                           \
+    COMPILER_FENCE;                          \
+    return_type __ret = (return_type)(expr); \
+    COMPILER_FENCE;                          \
+    __ret;                                   \
+  }))
+#define FENCE_WRAPPER_VOID(expr) \
+  (__extension__({               \
+    COMPILER_FENCE;              \
+    (expr);                      \
+    COMPILER_FENCE;              \
+  }))
 
-extern "C" {
-
-bool TEST_TOOL_FUNCTION Instrumenting() {
-  FN_PRELUDE;
-  return prevent_optimization_literal_bool_false;
-}
-
-void TEST_TOOL_FUNCTION InstrumentationPause() { FN_PRELUDE; }
-
-void TEST_TOOL_FUNCTION InstrumentationResume() { FN_PRELUDE; }
-
-static std::barrier barrier(2);
-void TEST_TOOL_FUNCTION InstrumentingWaitForAll() {
-  FN_PRELUDE;
-  if (!Instrumenting()) return;
-  InstrumentationPause();
-  barrier.arrive_and_wait();
-  InstrumentationResume();
-}
-
-int TEST_TOOL_FUNCTION RegisterThread(int preferred_thread_id = -1) {
-  FN_PRELUDE;
-  volatile int prevent_optimization_thread_id = preferred_thread_id;
-  return prevent_optimization_thread_id;
-}
-
-bool TEST_TOOL_FUNCTION Testing() {
-  FN_PRELUDE;
-  return prevent_optimization_literal_bool_false;
-}
-
-void TEST_TOOL_FUNCTION RunStart() { FN_PRELUDE; }
-
-void TEST_TOOL_FUNCTION RunEnd() { FN_PRELUDE; }
-
-void TEST_TOOL_FUNCTION AssertAlways(bool ok) {
-  FN_PRELUDE;
-  prevent_optimization_sink_bool = ok;
-}
-
-void TEST_TOOL_FUNCTION AssertAtleastOnce(int condition_idx, bool ok) {
-  FN_PRELUDE;
-  prevent_optimization_sink_int = condition_idx;
-  prevent_optimization_sink_bool = ok;
-}
-
-void TEST_TOOL_FUNCTION ContiguousMemoryHintInternal(void** bytes) {
-  FN_PRELUDE;
-  void** volatile prevent_opt = bytes;
-}
-void ContiguousMemoryHint(void* ptr, int size) {
-  void* data[2] = {ptr, reinterpret_cast<void*>(size)};
-  ContiguousMemoryHintInternal(data);
-}
+// clang-format off
+#define ASM_STUB(function_name)  \
+__asm__(                         \
+  ".global " #function_name "\n" \
+  #function_name ":\n"           \
+  "  ret\n")
+// clang-format on
 
 #define NO_INSTR(code)      \
   do {                      \
@@ -72,11 +31,54 @@ void ContiguousMemoryHint(void* ptr, int size) {
       code;                 \
     }                       \
   } while (0)
-}
 
 template <typename T>
 T TEST_TOOL_FUNCTION PreventOpt(T x) {
-  FN_PRELUDE;
+  COMPILER_FENCE;
   volatile T volatile_t = x;
   return volatile_t;
+  COMPILER_FENCE;
+}
+
+extern "C" {
+
+extern bool TEST_TOOL_FUNCTION _Instrumenting();
+extern void TEST_TOOL_FUNCTION _InstrumentationPause();
+extern void TEST_TOOL_FUNCTION _InstrumentationResume();
+extern int TEST_TOOL_FUNCTION _RegisterThread(int preferred_thread_id = -1);
+extern bool TEST_TOOL_FUNCTION _Testing();
+extern void TEST_TOOL_FUNCTION _RunStart();
+extern void TEST_TOOL_FUNCTION _RunEnd();
+extern void TEST_TOOL_FUNCTION _AssertAlways(bool ok);
+extern void TEST_TOOL_FUNCTION _AssertAtleastOnce(int condition_idx, bool ok);
+extern void TEST_TOOL_FUNCTION _ContiguousMemoryHintInternal(void** bytes);
+
+// clang-format off
+#define Instrumenting(...)                FENCE_WRAPPER(bool, _Instrumenting(__VA_ARGS__))
+#define InstrumentationPause(...)         FENCE_WRAPPER_VOID( _InstrumentationPause(__VA_ARGS__))
+#define InstrumentationResume(...)        FENCE_WRAPPER_VOID( _InstrumentationResume(__VA_ARGS__))
+#define RegisterThread(...)               FENCE_WRAPPER(int,  _RegisterThread(__VA_ARGS__))
+#define Testing(...)                      FENCE_WRAPPER(bool, _Testing(__VA_ARGS__))
+#define RunStart(...)                     FENCE_WRAPPER_VOID( _RunStart(__VA_ARGS__))
+#define RunEnd(...)                       FENCE_WRAPPER_VOID( _RunEnd(__VA_ARGS__))
+#define AssertAlways(...)                 FENCE_WRAPPER_VOID( _AssertAlways(__VA_ARGS__))
+#define AssertAtleastOnce(...)            FENCE_WRAPPER_VOID( _AssertAtleastOnce(__VA_ARGS__))
+#define ContiguousMemoryHintInternal(...) FENCE_WRAPPER_VOID( _ContiguousMemoryHintInternal(__VA_ARGS__))
+// clang-format on
+
+ASM_STUB(_Instrumenting);
+ASM_STUB(_InstrumentationPause);
+ASM_STUB(_InstrumentationResume);
+ASM_STUB(_RegisterThread);
+ASM_STUB(_Testing);
+ASM_STUB(_RunStart);
+ASM_STUB(_RunEnd);
+ASM_STUB(_AssertAlways);
+ASM_STUB(_AssertAtleastOnce);
+ASM_STUB(_ContiguousMemoryHintInternal);
+
+void ContiguousMemoryHint(void* ptr, int size) {
+  void* data[2] = {ptr, reinterpret_cast<void*>(size)};
+  ContiguousMemoryHintInternal(data);
+}
 }
