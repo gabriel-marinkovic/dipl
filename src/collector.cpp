@@ -74,13 +74,24 @@ static constexpr size_t kMemoryReferenceMaxCount = 4096;
 static constexpr size_t kMemoryReferenceBufferSize = sizeof(MemoryReference) * 4096;
 
 struct ThreadData {
-  int thread_idx;
-  bool entered_instrumentation;
+  thread_id_t thread_id;
+  int64_t thread_idx;
+
+  bool initialized_instrumentation;
+  void* event;
+
   uint8_t* tls_segment_base;
   MemoryReference* buffer_base;
   uint64_t memory_reference_count;
   BufferedFileWriter writer;
 };
+
+static ThreadData* the_threads[2];
+
+static int volatile the_done;
+static int volatile spinlock_barrier;
+static int volatile the_threads_waiting;
+static int volatile the_collection_runs_remaining = 1000;
 
 static void* the_mutex;
 static client_id_t the_client_id;
@@ -88,8 +99,6 @@ static uint64_t the_total_memory_reference_count;
 
 static void* the_module_mutex;
 static BufferedFileWriter the_module_writer;
-
-static bool the_thread_id_claimed[2];
 
 /* Allocated TLS slot offsets */
 enum TlsOffset {
@@ -104,12 +113,14 @@ static int the_tls_idx;
 #define BUF_PTR(tls_base) *(MemoryReference**)TLS_SLOT(tls_base, TLS_OFFSET_BUF_PTR)
 #define IS_INSTRUMENTING(tls_base) *(uintptr_t*)TLS_SLOT(tls_base, TLS_OFFSET_IS_INSTRUMENTING)
 
+#define TRACE(code)
+
 // `Wrap*` functions.
 static bool WrapInstrumenting() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   drwrap_replace_native_fini(drcontext);
-  return data->entered_instrumentation;
+  return data->initialized_instrumentation;
 }
 
 static void WrapInstrumentationPause() {
@@ -128,34 +139,31 @@ static void WrapInstrumentationResume() {
   drwrap_replace_native_fini(drcontext);
 }
 
-static int WrapRegisterThread(int preferred_thread_id = -1) {
-  DR_ASSERT(preferred_thread_id <= 1);
-
+static int WrapRegisterThread(int preferred_thread_idx = -1) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
+  DR_ASSERT(preferred_thread_idx <= 1);
+  DR_ASSERT(!data->initialized_instrumentation);
+
   dr_mutex_lock(the_mutex);
-  if (preferred_thread_id < 0) {
-    for (int i = 0; i < ArrayCount(the_thread_id_claimed); ++i) {
-      if (!the_thread_id_claimed[i]) {
-        preferred_thread_id = i;
+  if (preferred_thread_idx < 0) {
+    for (int i = 0; i < ArrayCount(the_threads); ++i) {
+      if (!the_threads[i]) {
+        preferred_thread_idx = i;
         break;
       }
     }
+    DR_ASSERT(preferred_thread_idx >= 0 && preferred_thread_idx < ArrayCount(the_threads));
   }
-
-  DR_ASSERT(preferred_thread_id >= 0 && preferred_thread_id <= ArrayCount(the_thread_id_claimed));
-  DR_ASSERT(!the_thread_id_claimed[preferred_thread_id]);
-  the_thread_id_claimed[preferred_thread_id] = true;
-  data->thread_idx = preferred_thread_id;
+  DR_ASSERT(!the_threads[preferred_thread_idx]);
+  data->thread_idx = preferred_thread_idx;
+  the_threads[data->thread_idx] = data;
   dr_mutex_unlock(the_mutex);
 
-  // TODO: We assume that we have enough space in buf ptr, and we probably do, but check this better.
-  MemoryReference* current = BUF_PTR(data->tls_segment_base);
-  current->type = REF_KIND_THREAD_IDX;
-  current->size = 0;
-  current->addr = reinterpret_cast<app_pc>(data->thread_idx);
-  BUF_PTR(data->tls_segment_base) = current + 1;
+  data->event = dr_event_create();
+  DR_ASSERT(data->event);
+  data->initialized_instrumentation = true;
 
   drwrap_replace_native_fini(drcontext);
   return data->thread_idx;
@@ -164,25 +172,84 @@ static int WrapRegisterThread(int preferred_thread_id = -1) {
 static bool WrapTesting() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
+
+  bool done = dr_atomic_load32(&the_done) != 0;
+  if (done) {
+    // Cleanup this thread's resources.
+    dr_event_destroy(data->event);
+    data->event = NULL;
+  } else {
+    if (dr_atomic_add32_return_sum(&the_threads_waiting, 1) < ArrayCount(the_threads)) {
+      TRACE(printf("Sleeping in WrapTesting: %ld\n", data->thread_idx));
+      dr_event_wait(data->event);
+      dr_event_reset(data->event);
+    } else {
+      dr_atomic_store32(&the_threads_waiting, 0);
+
+      if (data->thread_idx != 0) {
+        dr_event_signal(the_threads[0]->event);
+        dr_event_wait(data->event);
+        dr_event_reset(data->event);
+      }
+    }
+  }
+
+  TRACE(printf("Leaving WrapTesting: %ld\n", data->thread_idx));
+
   drwrap_replace_native_fini(drcontext);
-  return !data->entered_instrumentation;
+  return !done;
 }
 
 static void WrapRunStart() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
-  DR_ASSERT(!data->entered_instrumentation);
-  data->entered_instrumentation = true;
-  DR_ASSERT(IS_INSTRUMENTING(data->tls_segment_base) == 0);
+  DR_ASSERT(data->initialized_instrumentation);
+
+  TRACE(printf("Hello from WrapRunStart! TID: %ld\n", data->thread_idx));
+
+  // TODO: We assume that we have enough space in buf ptr, and we probably do, but check this better.
+  MemoryReference* current = BUF_PTR(data->tls_segment_base);
+  current->type = REF_KIND_THREAD_IDX;
+  current->size = 0;
+  current->addr = reinterpret_cast<app_pc>(data->thread_idx);
+  BUF_PTR(data->tls_segment_base) = current + 1;
   IS_INSTRUMENTING(data->tls_segment_base) = 1;
+
+  if (data->thread_idx == 0) {
+    // Reset spinlock.
+    dr_atomic_store32(&spinlock_barrier, 0);
+
+    if (dr_atomic_add32_return_sum(&the_collection_runs_remaining, -1) <= 0) {
+      dr_atomic_store32(&the_done, 1);
+      TRACE(printf("We did all collection runs, this is last.\n"));
+    }
+  }
+
+  int threads_waiting = dr_atomic_add32_return_sum(&the_threads_waiting, 1);
+  if (threads_waiting < ArrayCount(the_threads)) {
+    DR_ASSERT(threads_waiting > 1 || data->thread_idx == 0);
+
+    int64_t next_idx = (data->thread_idx + 1) % ArrayCount(the_threads);
+    ThreadData* next = the_threads[next_idx];
+    dr_event_signal(next->event);
+  } else {
+    dr_atomic_store32(&the_threads_waiting, 0);
+  }
+
+  TRACE(printf("Leaving WrapRunStart TID, spinning first tho: %ld\n", data->thread_idx));
+
+  dr_atomic_add32_return_sum(&spinlock_barrier, 1);
+  while (dr_atomic_load32(&spinlock_barrier) < ArrayCount(the_threads)) asm("pause");
+
   drwrap_replace_native_fini(drcontext);
 }
+
+static inline uint64_t min(uint64_t a, uint64_t b) { return a < b ? a : b; }
 
 static void WrapRunEnd() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
-  DR_ASSERT(IS_INSTRUMENTING(data->tls_segment_base));
   IS_INSTRUMENTING(data->tls_segment_base) = 0;
   drwrap_replace_native_fini(drcontext);
 }
@@ -434,6 +501,8 @@ static void EventThreadInit(void* drcontext) {
   // Keep `tls_segment_base` in a per-thread data structure so we can get the TLS slot and find where the pointer points
   // to in the buffer.
   data->thread_idx = -1;
+  data->thread_id = dr_get_thread_id(drcontext);
+
   data->tls_segment_base = (uint8_t*)dr_get_dr_segment_base(tls_seg);
   data->buffer_base =
       (MemoryReference*)dr_raw_mem_alloc(kMemoryReferenceBufferSize, DR_MEMPROT_READ | DR_MEMPROT_WRITE, NULL);

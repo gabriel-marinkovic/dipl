@@ -190,14 +190,15 @@ class CollectionRun:
     memory_hints: List[Set[int]] = dataclasses.field(default_factory=list)
 
 def process_file(collection_runs: List[CollectionRun], file_path):
-    collection_idx = 0
-    def get_run():
+    def get_next_run(collection_idx):
+        collection_idx += 1
         if collection_idx >= len(collection_runs):
             assert collection_idx == len(collection_runs)
             collection_runs.append(CollectionRun())
-        return collection_runs[collection_idx]
+        return collection_runs[collection_idx], collection_idx
 
-    run = get_run()
+    collection_idx = -1
+    run = None
     thread_idx = None
     def push_instr(instr):
         assert thread_idx is not None
@@ -240,6 +241,7 @@ def process_file(collection_runs: List[CollectionRun], file_path):
                 continue
             elif opcode == 3:
                 # Thread ID entry.
+                run, collection_idx = get_next_run(collection_idx)
                 thread_idx = addr
                 assert thread_idx >= 0
                 continue
@@ -312,9 +314,6 @@ def get_instructions_to_instrument(
         file_size = os.path.getsize(file_path)
         if file_size == 0:
             continue
-        if file_size > 1024**2:
-            print("skipping", filename, "cause too large:", file_size / 1024**2, "MB")
-            continue
         process_file(collection_runs, file_path)
 
     addrs = {}
@@ -323,13 +322,15 @@ def get_instructions_to_instrument(
         for addr, name, c0, c1 in instrs:
             if addr in addrs:
                 _, _, c00, c01 = addrs[addr]
-                if c00 != c0 or c01 != c1:
-                    print("WARNING: another run got a different count for instr:", addr, name)
                 c0 = max(c0, c00)
                 c1 = max(c1, c01)
             elif run_idx > 0:
                 print("WARNING: run", run_idx, "added a new instruction:", addr, name)
             addrs[addr] = (addr, name, c0, c1)
+
+    print("Collected instructions:")
+    for stuff in sorted(addrs.values()):
+        print(*stuff)
 
     modules = parse_modules(collect_directory)
 
