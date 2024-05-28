@@ -9,13 +9,13 @@ using QueueT = lockfree::spsc::Queue<uint32_t, QSIZE>;
 
 void producer(QueueT& q) {
   int thread_id = RegisterThread(0);
-  ContiguousMemoryHint(&q, sizeof(q));
 
   while (Testing()) {
     q.~QueueT();
     new (&q) QueueT();
 
     RunStart();
+    ContiguousMemoryHint(&q, sizeof(q));
 
     bool push1 = q.Push(PreventOpt(1));
     bool push2 = q.Push(PreventOpt(2));

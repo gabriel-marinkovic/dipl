@@ -74,15 +74,15 @@ void test(LockfreeStack& stack) {
     RunStart();
 
     bool ok = true;
-    ok = ok && stack.Push(5);
+    ok = ok && stack.Push(PreventOpt(5));
 
-    NO_INSTR(std::cout << thread_id << "; " << "Push: " << ok << std::endl);
+    //NO_INSTR(std::cout << thread_id << "; " << "Push: " << ok << std::endl);
 
     int out;
     ok = ok && stack.Pop(&out);
     ok = ok && (out == 5);
 
-    NO_INSTR(std::cout << thread_id << "; " << "Pop: " << ok << "; " << out << std::endl);
+    //NO_INSTR(std::cout << thread_id << "; " << "Pop: " << ok << "; " << out << std::endl);
 
     AssertAlways(ok);
     RunEnd();
