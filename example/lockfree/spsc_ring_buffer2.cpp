@@ -33,8 +33,8 @@ void producer(RingBufT& rb) {
         AssertAlways(write1);
         AssertAtleastOnce(0, !write2);
         AssertAtleastOnce(1, write2);
-        AssertAtleastOnce(0, !write3);
-        AssertAtleastOnce(1, write3);
+        AssertAtleastOnce(2, !write3);
+        AssertAtleastOnce(3, write3);
         RunEnd();
     }
 }
@@ -59,8 +59,8 @@ void consumer(RingBufT& rb) {
         ok = ok && (!read || (values[0] == 5 && values[1] == 6));
 
         AssertAlways(ok);
-        AssertAtleastOnce(3, !read);
-        AssertAtleastOnce(3, read && values[0] == 5 && values[1] == 6);
+        AssertAtleastOnce(4, !read);
+        AssertAtleastOnce(5, read && values[0] == 5 && values[1] == 6);
         RunEnd();
     }
 }
