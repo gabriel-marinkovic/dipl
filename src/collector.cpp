@@ -124,14 +124,20 @@ static int the_tls_idx;
 #define IS_INSTRUMENTING(tls_base) *(uintptr_t*)TLS_SLOT(tls_base, TLS_OFFSET_IS_INSTRUMENTING)
 
 // `Wrap*` functions.
-static bool WrapInstrumenting() {
+
+bool WrapTracing() {
+  drwrap_replace_native_fini(dr_get_current_drcontext());
+  return the_trace != 0;
+}
+
+bool WrapInstrumenting() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   drwrap_replace_native_fini(drcontext);
   return data->initialized_instrumentation;
 }
 
-static void WrapInstrumentationPause() {
+void WrapInstrumentationPause() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   DR_ASSERT(IS_INSTRUMENTING(data->tls_segment_base));
@@ -139,7 +145,7 @@ static void WrapInstrumentationPause() {
   drwrap_replace_native_fini(drcontext);
 }
 
-static void WrapInstrumentationResume() {
+void WrapInstrumentationResume() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   DR_ASSERT(!IS_INSTRUMENTING(data->tls_segment_base));
@@ -147,7 +153,7 @@ static void WrapInstrumentationResume() {
   drwrap_replace_native_fini(drcontext);
 }
 
-static int WrapRegisterThread(int preferred_thread_idx = -1) {
+int WrapRegisterThread(int preferred_thread_idx = -1) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
@@ -177,7 +183,7 @@ static int WrapRegisterThread(int preferred_thread_idx = -1) {
   return data->thread_idx;
 }
 
-static bool WrapTesting() {
+bool WrapTesting() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
@@ -208,7 +214,7 @@ static bool WrapTesting() {
   return !done;
 }
 
-static void WrapRunStart() {
+void WrapRunStart() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   DR_ASSERT(data->initialized_instrumentation);
@@ -254,7 +260,7 @@ static void WrapRunStart() {
 
 static inline uint64_t min(uint64_t a, uint64_t b) { return a < b ? a : b; }
 
-static void WrapRunEnd() {
+void WrapRunEnd() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
@@ -262,13 +268,13 @@ static void WrapRunEnd() {
   drwrap_replace_native_fini(drcontext);
 }
 
-// NOTE: `drwrap_replace_native` API only supports one argument functions, so arguments must be packed.
-static void WrapContiguousMemoryHintInternal(void** bytes) {
+void WrapAssertAlways(bool condition) { drwrap_replace_native_fini(dr_get_current_drcontext()); }
+
+void WrapAssertAtleastOnce(int idx, bool condition) { drwrap_replace_native_fini(dr_get_current_drcontext()); }
+
+void WrapContiguousMemoryHint(void* ptr, int size) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
-
-  void* ptr = bytes[0];
-  int size = static_cast<int>(reinterpret_cast<uintptr_t>(bytes[1]));
 
   // TODO: Lame assert.
   DR_ASSERT(size <= 65535);
@@ -637,17 +643,17 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
                               reinterpret_cast<app_pc>(reinterpret_cast<void*>(replace_with)), true, 0, NULL, false);
   };
 
+  replace_native("_Tracing", WrapTracing);
   replace_native("_Instrumenting", WrapInstrumenting);
   replace_native("_InstrumentationPause", WrapInstrumentationPause);
   replace_native("_InstrumentationResume", WrapInstrumentationResume);
-  // `InstrumentingWaitForAll` in userspace.
   replace_native("_RegisterThread", WrapRegisterThread);
   replace_native("_Testing", WrapTesting);
   replace_native("_RunStart", WrapRunStart);
   replace_native("_RunEnd", WrapRunEnd);
-  // `AssertAlways` already noop.
-  // `AssertAtleastOnce` already noop.
-  replace_native("_ContiguousMemoryHintInternal", WrapContiguousMemoryHintInternal);
+  replace_native("_AssertAlways", WrapAssertAlways);
+  replace_native("_AssertAtleastOnce", WrapAssertAtleastOnce);
+  replace_native("_ContiguousMemoryHint", WrapContiguousMemoryHint);
 
   dr_free_module_data(main_module);
 

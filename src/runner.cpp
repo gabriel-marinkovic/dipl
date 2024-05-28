@@ -153,7 +153,24 @@ static void BestEffortAbort() {
 
 // `Wrap*` functions.
 
-static int WrapRegisterThread(int preferred_thread_idx = -1) {
+// `Instrumenting` is already `return false`.
+// `InstrumentationPause` is already noop.
+// `InstrumentationResume` is already noop.
+
+bool WrapTracing() {
+  drwrap_replace_native_fini(dr_get_current_drcontext());
+  return the_trace != 0;
+}
+
+bool WrapInstrumenting() {
+  drwrap_replace_native_fini(dr_get_current_drcontext());
+  return false;
+}
+
+void WrapInstrumentationPause() { drwrap_replace_native_fini(dr_get_current_drcontext()); }
+void WrapInstrumentationResume() { drwrap_replace_native_fini(dr_get_current_drcontext()); }
+
+int WrapRegisterThread(int preferred_thread_idx = -1) {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
@@ -183,7 +200,7 @@ static int WrapRegisterThread(int preferred_thread_idx = -1) {
   return data->thread_idx;
 }
 
-static bool WrapTesting() {
+bool WrapTesting() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
@@ -223,13 +240,13 @@ static bool WrapTesting() {
     }
   }
 
-  TRACE(printf("Leaving WrapTesting: %ld\n", data->thread_idx));
+  TRACE(printf("Leaving WrapTesting: %ld (done: %d)\n", data->thread_idx, done));
   drwrap_replace_native_fini(drcontext);
 
   return !done;
 }
 
-static void WrapRunStart() {
+void WrapRunStart() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
   DR_ASSERT(data->initialized_instrumentation);
@@ -286,7 +303,7 @@ static void WrapRunStart() {
 
 static inline uint64_t min(uint64_t a, uint64_t b) { return a < b ? a : b; }
 
-static void WrapRunEnd() {
+void WrapRunEnd() {
   void* drcontext = dr_get_current_drcontext();
   ThreadData* data = (ThreadData*)drmgr_get_tls_field(drcontext, the_tls_idx);
 
@@ -363,7 +380,7 @@ static void WrapRunEnd() {
   drwrap_replace_native_fini(drcontext);
 }
 
-static void WrapAssertAlways(bool result) {
+void WrapAssertAlways(bool result) {
   void* drcontext = dr_get_current_drcontext();
   if (result) {
     dr_atomic_add32_return_sum(&the_threads_successful, 1);
@@ -371,12 +388,16 @@ static void WrapAssertAlways(bool result) {
   drwrap_replace_native_fini(drcontext);
 }
 
-static void WrapAssertAtleastOnce(int condition_idx, bool result) {
+void WrapAssertAtleastOnce(int condition_idx, bool result) {
   void* drcontext = dr_get_current_drcontext();
   dr_atomic_store32(&the_threads_successful_atleast_once_used[condition_idx], 1);
   // if (result) dr_printf("WrapAssertAtleastOnce: %d %d\n", condition_idx, result);
   if (result) dr_atomic_store32(&the_threads_successful_atleast_once[condition_idx], 1);
   drwrap_replace_native_fini(drcontext);
+}
+
+void WrapContiguousMemoryHint(void* ptr, int size) {
+  drwrap_replace_native_fini(dr_get_current_drcontext());
 }
 
 static bool WakeNextThread(ThreadData* thread) {
@@ -670,15 +691,17 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
                               reinterpret_cast<app_pc>(reinterpret_cast<void*>(replace_with)), true, 0, NULL, false);
   };
 
-  // `Instrumenting` is already `return false`.
-  // `InstrumentationPause` is already noop.
-  // `InstrumentationResume` is already noop.
+  replace_native("_Tracing", WrapTracing);
+  replace_native("_Instrumenting", WrapInstrumenting);
+  replace_native("_InstrumentationPause", WrapInstrumentationPause);
+  replace_native("_InstrumentationResume", WrapInstrumentationResume);
   replace_native("_RegisterThread", WrapRegisterThread);
   replace_native("_Testing", WrapTesting);
   replace_native("_RunStart", WrapRunStart);
   replace_native("_RunEnd", WrapRunEnd);
   replace_native("_AssertAlways", WrapAssertAlways);
   replace_native("_AssertAtleastOnce", WrapAssertAtleastOnce);
+  replace_native("_ContiguousMemoryHint", WrapContiguousMemoryHint);
 
   dr_free_module_data(main_module);
 

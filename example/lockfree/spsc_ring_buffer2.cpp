@@ -17,7 +17,7 @@ void producer(RingBufT& rb) {
         new (&rb) RingBufT();
 
         RunStart();
-        //ContiguousMemoryHint(&rb, sizeof(rb));
+        ContiguousMemoryHint(&rb, sizeof(rb));
 
         uint32_t data1[] = {1, 2};
         uint32_t data2[] = {3, 4};

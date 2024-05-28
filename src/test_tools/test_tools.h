@@ -29,7 +29,16 @@ __asm__(                         \
   do {                      \
     if (!Instrumenting()) { \
       code;                 \
+      COMPILER_FENCE;       \
     }                       \
+  } while (0)
+
+#define TRACE(code)   \
+  do {                \
+    if (Tracing()) {  \
+      code;           \
+      COMPILER_FENCE; \
+    }                 \
   } while (0)
 
 template <typename T>
@@ -42,6 +51,7 @@ T TEST_TOOL_FUNCTION PreventOpt(T x) {
 
 extern "C" {
 
+extern bool TEST_TOOL_FUNCTION _Tracing();
 extern bool TEST_TOOL_FUNCTION _Instrumenting();
 extern void TEST_TOOL_FUNCTION _InstrumentationPause();
 extern void TEST_TOOL_FUNCTION _InstrumentationResume();
@@ -51,21 +61,23 @@ extern void TEST_TOOL_FUNCTION _RunStart();
 extern void TEST_TOOL_FUNCTION _RunEnd();
 extern void TEST_TOOL_FUNCTION _AssertAlways(bool ok);
 extern void TEST_TOOL_FUNCTION _AssertAtleastOnce(int condition_idx, bool ok);
-extern void TEST_TOOL_FUNCTION _ContiguousMemoryHintInternal(void** bytes);
+extern void TEST_TOOL_FUNCTION _ContiguousMemoryHint(void* ptr, int size);
 
 // clang-format off
-#define Instrumenting(...)                FENCE_WRAPPER(bool, _Instrumenting(__VA_ARGS__))
-#define InstrumentationPause(...)         FENCE_WRAPPER_VOID( _InstrumentationPause(__VA_ARGS__))
-#define InstrumentationResume(...)        FENCE_WRAPPER_VOID( _InstrumentationResume(__VA_ARGS__))
-#define RegisterThread(...)               FENCE_WRAPPER(int,  _RegisterThread(__VA_ARGS__))
-#define Testing(...)                      FENCE_WRAPPER(bool, _Testing(__VA_ARGS__))
-#define RunStart(...)                     FENCE_WRAPPER_VOID( _RunStart(__VA_ARGS__))
-#define RunEnd(...)                       FENCE_WRAPPER_VOID( _RunEnd(__VA_ARGS__))
-#define AssertAlways(...)                 FENCE_WRAPPER_VOID( _AssertAlways(__VA_ARGS__))
-#define AssertAtleastOnce(...)            FENCE_WRAPPER_VOID( _AssertAtleastOnce(__VA_ARGS__))
-#define ContiguousMemoryHintInternal(...) FENCE_WRAPPER_VOID( _ContiguousMemoryHintInternal(__VA_ARGS__))
+#define Tracing(...)               FENCE_WRAPPER(bool, _Tracing(__VA_ARGS__))
+#define Instrumenting(...)         FENCE_WRAPPER(bool, _Instrumenting(__VA_ARGS__))
+#define InstrumentationPause(...)  FENCE_WRAPPER_VOID( _InstrumentationPause(__VA_ARGS__))
+#define InstrumentationResume(...) FENCE_WRAPPER_VOID( _InstrumentationResume(__VA_ARGS__))
+#define RegisterThread(...)        FENCE_WRAPPER(int,  _RegisterThread(__VA_ARGS__))
+#define Testing(...)               FENCE_WRAPPER(bool, _Testing(__VA_ARGS__))
+#define RunStart(...)              FENCE_WRAPPER_VOID( _RunStart(__VA_ARGS__))
+#define RunEnd(...)                FENCE_WRAPPER_VOID( _RunEnd(__VA_ARGS__))
+#define AssertAlways(...)          FENCE_WRAPPER_VOID( _AssertAlways(__VA_ARGS__))
+#define AssertAtleastOnce(...)     FENCE_WRAPPER_VOID( _AssertAtleastOnce(__VA_ARGS__))
+#define ContiguousMemoryHint(...)  FENCE_WRAPPER_VOID( _ContiguousMemoryHint(__VA_ARGS__))
 // clang-format on
 
+ASM_STUB(_Tracing);
 ASM_STUB(_Instrumenting);
 ASM_STUB(_InstrumentationPause);
 ASM_STUB(_InstrumentationResume);
@@ -75,10 +87,6 @@ ASM_STUB(_RunStart);
 ASM_STUB(_RunEnd);
 ASM_STUB(_AssertAlways);
 ASM_STUB(_AssertAtleastOnce);
-ASM_STUB(_ContiguousMemoryHintInternal);
+ASM_STUB(_ContiguousMemoryHint);
 
-void ContiguousMemoryHint(void* ptr, int size) {
-  void* data[2] = {ptr, reinterpret_cast<void*>(size)};
-  ContiguousMemoryHintInternal(data);
-}
 }
