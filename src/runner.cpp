@@ -672,12 +672,12 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
   // `Instrumenting` is already `return false`.
   // `InstrumentationPause` is already noop.
   // `InstrumentationResume` is already noop.
-  replace_native("RegisterThread", WrapRegisterThread);
-  replace_native("Testing", WrapTesting);
-  replace_native("RunStart", WrapRunStart);
-  replace_native("RunEnd", WrapRunEnd);
-  replace_native("AssertAlways", WrapAssertAlways);
-  replace_native("AssertAtleastOnce", WrapAssertAtleastOnce);
+  replace_native("_RegisterThread", WrapRegisterThread);
+  replace_native("_Testing", WrapTesting);
+  replace_native("_RunStart", WrapRunStart);
+  replace_native("_RunEnd", WrapRunEnd);
+  replace_native("_AssertAlways", WrapAssertAlways);
+  replace_native("_AssertAtleastOnce", WrapAssertAtleastOnce);
 
   dr_free_module_data(main_module);
 

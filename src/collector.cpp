@@ -527,17 +527,17 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
                               reinterpret_cast<app_pc>(reinterpret_cast<void*>(replace_with)), true, 0, NULL, false);
   };
 
-  replace_native("Instrumenting", WrapInstrumenting);
-  replace_native("InstrumentationPause", WrapInstrumentationPause);
-  replace_native("InstrumentationResume", WrapInstrumentationResume);
+  replace_native("_Instrumenting", WrapInstrumenting);
+  replace_native("_InstrumentationPause", WrapInstrumentationPause);
+  replace_native("_InstrumentationResume", WrapInstrumentationResume);
   // `InstrumentingWaitForAll` in userspace.
-  replace_native("RegisterThread", WrapRegisterThread);
-  replace_native("Testing", WrapTesting);
-  replace_native("RunStart", WrapRunStart);
-  replace_native("RunEnd", WrapRunEnd);
+  replace_native("_RegisterThread", WrapRegisterThread);
+  replace_native("_Testing", WrapTesting);
+  replace_native("_RunStart", WrapRunStart);
+  replace_native("_RunEnd", WrapRunEnd);
   // `AssertAlways` already noop.
   // `AssertAtleastOnce` already noop.
-  replace_native("ContiguousMemoryHintInternal", WrapContiguousMemoryHintInternal);
+  replace_native("_ContiguousMemoryHintInternal", WrapContiguousMemoryHintInternal);
 
   dr_free_module_data(main_module);
 
