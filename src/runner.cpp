@@ -337,7 +337,8 @@ static void WrapRunEnd() {
     uint64_t t = GetElapsedMillisCoarse();
     dr_atomic_store_u64(&the_last_run_completed_time_ms, t);
 
-    if (the_total_run_count % (the_total_perm_count_log / min(the_total_perm_count_log, 128)) == 0) {
+    const uint64_t runs_before_logging = min(100000, (the_total_perm_count_log / min(the_total_perm_count_log, 128)));
+    if (the_total_run_count % runs_before_logging == 0) {
       // TODO: Investigate why using floating point operations (in particular printing, with either `printf` or
       // `dr_printf`) crashes us with the `basic_passing` example.
       // https://dynamorio.org/transparency.html#sec_trans_floating_point
