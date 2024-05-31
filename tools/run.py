@@ -276,25 +276,25 @@ def process_run(run):
                 new_addrs |= block
         return new_addrs
 
-    instructions_doing_shared_access = set()
-    shared_memory = set()
-    for a1 in run.accesses:
-        for a2 in run.accesses:
-            if a1.thread_idx == a2.thread_idx:
-                continue
-            mem_intersection = (
-                with_hints(a1.write_addrs) & with_hints(a2.read_addrs)) | (
-                with_hints(a2.write_addrs) & with_hints(a1.read_addrs)
-            )
-            shared_memory.update(mem_intersection)
-            if len(mem_intersection) > 0:
-                instructions_doing_shared_access.add((a1.instr_addr, a1.instr_name))
-                instructions_doing_shared_access.add((a2.instr_addr, a2.instr_name))
+    reads_from_thread = collections.defaultdict(set)
+    writes_from_thread = collections.defaultdict(set)
+    for a in run.accesses:
+        reads_from_thread[a.thread_idx] |= a.read_addrs
+        writes_from_thread[a.thread_idx] |= a.write_addrs
 
+    shared_memory = set()
+    for thread_idx_read, addrs_read in reads_from_thread.items():
+        for thread_idx_write, addrs_write in reads_from_thread.items():
+            if thread_idx_read != thread_idx_write:
+                shared_memory |= with_hints(addrs_read) & with_hints(addrs_write)
+
+    instructions_doing_shared_access = set()
     access_count_per_instruction_address = collections.defaultdict(collections.Counter)
     for a in run.accesses:
-        assert (a.thread_idx == 0 or a.thread_idx == 1) and "2 thread limit"
-        access_count_per_instruction_address[a.instr_addr][a.thread_idx] += 1
+        if (a.instr_addr in instructions_doing_shared_access or
+            (a.write_addrs | a.read_addrs) & shared_memory):
+            instructions_doing_shared_access.add((a.instr_addr, a.instr_name))
+            access_count_per_instruction_address[a.instr_addr][a.thread_idx] += 1
 
     instrs_final = []
     for addr, name in sorted(instructions_doing_shared_access):
@@ -398,6 +398,7 @@ parser.add_argument(
     help="Directory which contains `libcollector.so` and `librunner.so`",
 )
 parser.add_argument(
+    "-n",
     "--collection_run_count",
     default=1000,
     help="How many times to repeat the collection step",
