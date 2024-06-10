@@ -283,10 +283,13 @@ def process_run(run):
         writes_from_thread[a.thread_idx] |= a.write_addrs
 
     shared_memory = set()
-    for thread_idx_read, addrs_read in reads_from_thread.items():
-        for thread_idx_write, addrs_write in reads_from_thread.items():
-            if thread_idx_read != thread_idx_write:
-                shared_memory |= with_hints(addrs_read) & with_hints(addrs_write)
+    for thread_idx_write, addrs_write in reads_from_thread.items():
+        for thread_idx_read, addrs_read in reads_from_thread.items():
+            if thread_idx_write != thread_idx_read:
+                shared_memory |= with_hints(addrs_write) & with_hints(addrs_read)
+        for thread_idx_write2, addrs_write2 in reads_from_thread.items():
+            if thread_idx_write != thread_idx_write2:
+                shared_memory |= with_hints(addrs_write) & with_hints(addrs_write2)
 
     instructions_doing_shared_access = set()
     access_count_per_instruction_address = collections.defaultdict(collections.Counter)
