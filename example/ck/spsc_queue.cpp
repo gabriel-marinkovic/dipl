@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <cstdint>
 #include <thread>
-#include "ck_fifo.h"
+#include <ck_fifo.h>
 #include "test_tools.h"
 
 constexpr int QSIZE = 3;

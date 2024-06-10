@@ -67,11 +67,13 @@ static uint64_t CalculateChoose(uint64_t n, uint64_t k) {
 }
 
 // http://graphics.stanford.edu/~seander/bithacks.html
-static inline uint64_t FirstPermutation(uint64_t n, uint64_t c) { return (1 << c) - 1; }
-static inline uint64_t LastPermutation(uint64_t n, uint64_t c) { return (1 << n) - (1 << (n - c)); }
+static inline uint64_t FirstPermutation(uint64_t n, uint64_t c) { return (1llu << c) - 1llu; }
+static inline uint64_t LastPermutation(uint64_t n, uint64_t c) { return (1llu << n) - (1llu << (n - c)); }
 static inline uint64_t NextPermutation(uint64_t v) {
-  uint64_t t = (v | (v - 1)) + 1;
-  uint64_t w = t | ((((t & -t) / (v & -v)) >> 1) - 1);
+  dr_printf("generating perm for %llu\n", v);
+  uint64_t t = (v | (v - 1llu)) + 1llu;
+  uint64_t w = t | ((((t & -t) / (v & -v)) >> 1llu) - 1llu);
+  dr_printf("generating perm for %llu --> %llu\n", v, w);
   return w;
 }
 static inline uint64_t DeltaFromPermutation(uint64_t v) { return v ^ (v << 1); }
@@ -301,6 +303,7 @@ void WrapRunStart() {
   drwrap_replace_native_fini(drcontext);
 }
 
+static inline uint64_t max(uint64_t a, uint64_t b) { return a > b ? a : b; }
 static inline uint64_t min(uint64_t a, uint64_t b) { return a < b ? a : b; }
 
 void WrapRunEnd() {
@@ -354,7 +357,7 @@ void WrapRunEnd() {
     uint64_t t = GetElapsedMillisCoarse();
     dr_atomic_store_u64(&the_last_run_completed_time_ms, t);
 
-    const uint64_t runs_before_logging = min(100000, (the_total_perm_count_log / min(the_total_perm_count_log, 128)));
+    const uint64_t runs_before_logging = max(min(100000, (the_total_perm_count_log / max(the_total_perm_count_log, 128))), 1);
     if (the_total_run_count % runs_before_logging == 0) {
       // TODO: Investigate why using floating point operations (in particular printing, with either `printf` or
       // `dr_printf`) crashes us with the `basic_passing` example.
@@ -396,9 +399,7 @@ void WrapAssertAtleastOnce(int condition_idx, bool result) {
   drwrap_replace_native_fini(drcontext);
 }
 
-void WrapContiguousMemoryHint(void* ptr, int size) {
-  drwrap_replace_native_fini(dr_get_current_drcontext());
-}
+void WrapContiguousMemoryHint(void* ptr, int size) { drwrap_replace_native_fini(dr_get_current_drcontext()); }
 
 static bool WakeNextThread(ThreadData* thread) {
   for (size_t i = 1; i < ArrayCount(the_threads); ++i) {
@@ -594,11 +595,9 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
     if (instr_count == 0) {
       dr_fprintf(STDERR, "Error: no instructions provided in '%s'\n", instr_path);
       dr_abort();
-    } else if (instr_count >= 32) {
-      dr_fprintf(STDERR, "Error: too many instructions (%llu) provided in '%s'\n", instr_count, instr_path);
-      dr_abort();
     }
 
+    uint64_t per_thread_count[2]{};
     the_instrumented_instrs = DrThreadAllocArray<InstrumentedInstruction>(NULL, instr_count);
     for (uint64_t i = 0; i < instr_count; ++i) {
       ok = instr_reader.ReadString(NULL, &the_instrumented_instrs[i].path);
@@ -616,9 +615,26 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
       ok = instr_reader.ReadUint64LE(&the_instrumented_instrs[i].access_count2);
       DR_ASSERT(ok);
 
+      per_thread_count[0] += the_instrumented_instrs[i].access_count1;
+      per_thread_count[1] += the_instrumented_instrs[i].access_count2;
+
       dr_printf("Parsed instr %.*s, %llu (access count: %llu, %llu)\n", StringArgs(the_instrumented_instrs[i].path),
                 the_instrumented_instrs[i].adddr_relative, the_instrumented_instrs[i].access_count1,
                 the_instrumented_instrs[i].access_count2);
+    }
+
+    uint64_t total = 0;
+    for (int i = 0; i < ArrayCount(per_thread_count); ++i) {
+      total += per_thread_count[i];
+      if (per_thread_count[i] > 32) {
+        dr_fprintf(STDERR, "Error: too many instructions (%llu) for thread idx %d provided in '%s'\n", instr_count, i,
+                   instr_path);
+        dr_abort();
+      }
+    }
+    if (total > 64) {
+      dr_fprintf(STDERR, "Error: too many instructions (%llu) in total provided in '%s'\n", instr_count, instr_path);
+      dr_abort();
     }
 
     instr_reader.Destroy();
@@ -657,6 +673,8 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
       the_first_perm = permutation;
       the_last_perm = permutation;
     } else {
+      dr_printf("------ total_access_count %llu, thread0_access_count %llu, thread1_access_count %llu\n",
+                total_access_count, thread0_access_count, total_access_count - thread0_access_count);
       the_first_perm = FirstPermutation(total_access_count, thread0_access_count);
       the_last_perm = LastPermutation(total_access_count, thread0_access_count);
       the_total_perm_count_log = CalculateChoose(total_access_count, thread0_access_count);
