@@ -626,13 +626,13 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char* argv[]) {
     for (int i = 0; i < ArrayCount(per_thread_count); ++i) {
       total += per_thread_count[i];
       if (per_thread_count[i] > 32) {
-        dr_fprintf(STDERR, "Error: too many instructions (%llu) for thread idx %d provided in '%s'\n", instr_count, i,
+        dr_fprintf(STDERR, "Error: too many instructions (%llu) for thread idx %d provided in '%s'\n", per_thread_count[i], i,
                    instr_path);
         dr_abort();
       }
     }
     if (total > 64) {
-      dr_fprintf(STDERR, "Error: too many instructions (%llu) in total provided in '%s'\n", instr_count, instr_path);
+      dr_fprintf(STDERR, "Error: too many instructions (%llu) in total provided in '%s'\n", total, instr_path);
       dr_abort();
     }
 
