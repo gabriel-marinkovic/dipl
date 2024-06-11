@@ -70,10 +70,8 @@ static uint64_t CalculateChoose(uint64_t n, uint64_t k) {
 static inline uint64_t FirstPermutation(uint64_t n, uint64_t c) { return (1llu << c) - 1llu; }
 static inline uint64_t LastPermutation(uint64_t n, uint64_t c) { return (1llu << n) - (1llu << (n - c)); }
 static inline uint64_t NextPermutation(uint64_t v) {
-  dr_printf("generating perm for %llu\n", v);
   uint64_t t = (v | (v - 1llu)) + 1llu;
   uint64_t w = t | ((((t & -t) / (v & -v)) >> 1llu) - 1llu);
-  dr_printf("generating perm for %llu --> %llu\n", v, w);
   return w;
 }
 static inline uint64_t DeltaFromPermutation(uint64_t v) { return v ^ (v << 1); }
@@ -357,8 +355,9 @@ void WrapRunEnd() {
     uint64_t t = GetElapsedMillisCoarse();
     dr_atomic_store_u64(&the_last_run_completed_time_ms, t);
 
-    const uint64_t runs_before_logging = max(min(100000, (the_total_perm_count_log / max(the_total_perm_count_log, 128))), 1);
-    if (the_total_run_count % runs_before_logging == 0) {
+    const uint64_t runs_before_logging = min(100000, max(10000, the_total_run_count / (1LLU << 13)));
+
+    if (runs_before_logging > 0 && the_total_run_count % runs_before_logging == 0) {
       // TODO: Investigate why using floating point operations (in particular printing, with either `printf` or
       // `dr_printf`) crashes us with the `basic_passing` example.
       // https://dynamorio.org/transparency.html#sec_trans_floating_point
