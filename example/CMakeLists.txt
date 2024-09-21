@@ -3,7 +3,6 @@ add_compile_options(-g -ggdb -pthread -O2)
 include_directories("../src/test_tools")
 
 add_subdirectory(boost)
-#add_subdirectory(ck)
 add_subdirectory(lockfree)
 
 add_executable(basic basic.cpp)
